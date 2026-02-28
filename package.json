@@ -27,6 +27,7 @@
   "scripts": {
     "start": "bun ./src/bot.ts",
     "deploy": "bun ./src/utils/loaders/deploy.ts",
-    "check": "bunx biome check --write"
+    "check": "bunx biome check --write",
+    "generate:assets": "bun scripts/generateAssets.ts"
   }
 }

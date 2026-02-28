@@ -20,6 +20,7 @@ import {
 import { formatDuration, parseBeatmap } from '@/utils/osu/parseBeatmap';
 import { getScrollMs } from '@/utils/osu/scrollSpeed';
 import { renderStrainChart } from '@/utils/osu/strainChart';
+import { getUserPrefs } from '@/utils/osu/userPrefs';
 import type { Event } from '@/utils/types/event';
 
 const UNSUPPORTED_GAMEMODE =
@@ -78,7 +79,8 @@ export const event: Event<Events.MessageCreate> = {
       }
 
       const previewTime = extractPreviewTime(rawBeatmap);
-      const scrollMs = getScrollMs(message.guild.id);
+      const userPrefs = getUserPrefs(message.author.id);
+      const scrollMs = getScrollMs(message.author.id);
 
       // 3. Fetch audio + cover in parallel
       const audioFilename = extractAudioFilename(rawBeatmap);
@@ -87,13 +89,19 @@ export const event: Event<Events.MessageCreate> = {
         fetchCoverImage(beatmapSetId),
       ]);
 
-      // 4. Encode video (starts 1 s before first note; audio seeks to previewTime)
+      // 4. Encode video
       const videoPath = await encodeVideo(
         meta,
         audio,
         coverImage,
         previewTime,
         scrollMs,
+        {
+          noteStyle: userPrefs.noteStyle,
+          noteColors: userPrefs.noteColors,
+          noteColorSpecial: userPrefs.noteColorSpecial,
+        },
+        userPrefs.renderMode,
       );
 
       // 5. Render strain chart
@@ -131,7 +139,7 @@ export const event: Event<Events.MessageCreate> = {
         // attachment:// URL inside embeds
         .setImage('attachment://strain.png')
         .setFooter({
-          text: `osu!preview-botinator • scroll speed: ${scrollMs} ms`,
+          text: `osu!preview-botinator • scroll: ${scrollMs} ms • render: ${userPrefs.renderMode}`,
         });
 
       if (coverImage) {

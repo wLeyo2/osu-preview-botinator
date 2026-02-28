@@ -7,6 +7,7 @@ import { PassThrough } from 'stream';
 import logger from '@/utils/logger';
 import type { AudioResult } from './fetchAudio';
 import type { BeatmapMeta } from './parseBeatmap';
+import type { RenderOptions } from './renderer';
 import {
   DEFAULT_SCROLL_MS,
   FPS,
@@ -14,30 +15,40 @@ import {
   VIDEO_HEIGHT,
   VIDEO_WIDTH,
 } from './renderer';
+import type { RenderMode } from './userPrefs';
 
 /** Hard cap on rendered video length. Maps longer than this show only the last 4 minutes. */
 const MAX_RENDER_MS = 240_000; // 4 minutes
 
+/** Extra time rendered after the last note so the video doesn't end abruptly. */
+const TAIL_MS = 1000;
+
 /**
  * Encodes a mania preview video and returns the path to the temporary file.
  *
- * The video always starts 1 second before the first hit object (map start),
- * NOT at the audio preview time — the audio still seeks to the preview time
- * so the song plays in sync.
+ * Short maps (≤ 4 min drain): starts 1 s before the first note, renders everything.
+ * Long maps (> 4 min drain):
+ *   - renderMode 'last4min' (default): renders the final 4 minutes.
+ *   - renderMode 'preview': centres the 4-minute window on the beatmap's
+ *     preview point, clamped so the window stays within the note range.
  *
- * @param meta       Parsed beatmap metadata
- * @param audio      Audio data extracted from the .osz
- * @param coverImage Cover image buffer (optional)
- * @param audioStartMs  Where in the song the audio seek begins (preview time)
- * @param scrollMs   Visible note window in ms (controls scroll speed)
- * @returns          Absolute path to the output .mp4 file
+ * @param meta         Parsed beatmap metadata
+ * @param audio        Audio data extracted from the .osz
+ * @param coverImage   Cover image buffer (optional)
+ * @param previewTime  Beatmap preview point in ms (used for audio seek + preview mode)
+ * @param scrollMs     Visible note window in ms (controls scroll speed)
+ * @param renderOpts   Per-user note style/colour overrides
+ * @param renderMode   Window selection mode for long maps
+ * @returns            Absolute path to the output .mp4 file
  */
 export async function encodeVideo(
   meta: BeatmapMeta,
   audio: AudioResult,
   coverImage: Buffer | null,
-  audioStartMs: number,
+  previewTime: number,
   scrollMs = DEFAULT_SCROLL_MS,
+  renderOpts: RenderOptions = {},
+  renderMode: RenderMode = 'last4min',
 ): Promise<string> {
   const firstNoteMs = meta.notes[0]?.startTime ?? 0;
   const lastNoteMs =
@@ -49,13 +60,25 @@ export async function encodeVideo(
   let durationMs: number;
 
   if (drainMs <= MAX_RENDER_MS) {
-    // Short map: start 1 s before first note, render the whole thing
+    // Short map: start 1 s before first note, render the whole thing + tail
     videoMapStartMs = Math.max(0, firstNoteMs - 1000);
-    durationMs = drainMs;
+    durationMs = drainMs + TAIL_MS;
+  } else if (renderMode === 'preview') {
+    // Centre the window on the preview point, clamped to note boundaries so we
+    // never render empty seconds just to honour the centre position.
+    const halfWindow = MAX_RENDER_MS / 2;
+    const idealStart = previewTime - halfWindow;
+    // Clamp: window must not start before firstNoteMs or end after lastNoteMs
+    const clampedStart = Math.max(
+      firstNoteMs,
+      Math.min(idealStart, lastNoteMs - MAX_RENDER_MS),
+    );
+    videoMapStartMs = clampedStart;
+    durationMs = MAX_RENDER_MS + TAIL_MS;
   } else {
-    // Long map: render only the last 4 minutes
+    // 'last4min': render the final 4 minutes + tail
     videoMapStartMs = Math.max(0, lastNoteMs - MAX_RENDER_MS);
-    durationMs = MAX_RENDER_MS;
+    durationMs = MAX_RENDER_MS + TAIL_MS;
   }
 
   const audioSeekMs = videoMapStartMs;
@@ -75,6 +98,7 @@ export async function encodeVideo(
       audioPath,
       outPath,
       scrollMs,
+      renderOpts,
     );
   } finally {
     await fs.unlink(audioPath).catch(() => {});
@@ -93,6 +117,7 @@ function runFfmpeg(
   audioPath: string,
   outPath: string,
   scrollMs: number,
+  renderOpts: RenderOptions = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const videoStream = new PassThrough();
@@ -109,8 +134,8 @@ function runFfmpeg(
       .inputOptions([`-ss ${(audioSeekMs / 1000).toFixed(3)}`])
       .outputOptions([
         '-c:v libx264',
-        '-preset ultrafast',
-        '-crf 28',
+        '-preset veryfast',
+        '-crf 25',
         '-pix_fmt yuv420p',
         '-c:a aac',
         '-b:a 128k',
@@ -136,10 +161,10 @@ function runFfmpeg(
       async (rgbaData: Buffer) => {
         const ok = videoStream.write(rgbaData);
         if (!ok) {
-          // Renderer is ahead of ffmpeg — wait for the buffer to drain
           await new Promise<void>((res) => videoStream.once('drain', res));
         }
       },
+      renderOpts,
     )
       .then(() => videoStream.end())
       .catch((err: unknown) => {

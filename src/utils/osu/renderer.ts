@@ -1,23 +1,30 @@
-import type { SKRSContext2D } from '@napi-rs/canvas';
+import type { Image, SKRSContext2D } from '@napi-rs/canvas';
 import { createCanvas } from '@napi-rs/canvas';
+import type { SkinMap } from './noteAssets';
+import { loadNoteAssets } from './noteAssets';
 import type { BeatmapMeta } from './parseBeatmap';
+import type { NoteStyle } from './userPrefs';
+import {
+  NOTE_COLOR_SPECIAL_DEFAULT,
+  NOTE_COLORS_DEFAULT,
+  NOTE_STYLE_DEFAULT,
+} from './userPrefs';
 
 // ─── Layout constants ──────────────────────────────────────────────────────────
 
 export const VIDEO_WIDTH = 360;
 export const VIDEO_HEIGHT = 640; // 9:16 portrait
 
-export const FPS = 30;
+export const FPS = 60;
 
 /** Default: how many ms of notes are visible in the playfield at once */
-export const DEFAULT_SCROLL_MS = 1500;
+export const DEFAULT_SCROLL_MS = 500;
 
 const HEADER_HEIGHT = 100;
 const HITLINE_Y = VIDEO_HEIGHT - 70;
 const PLAYFIELD_HEIGHT = HITLINE_Y - HEADER_HEIGHT;
 
 const COL_GAP = 2;
-const NOTE_RADIUS = 4;
 const NOTE_HEIGHT = 22;
 
 // ─── Colour scheme ─────────────────────────────────────────────────────────────
@@ -27,42 +34,33 @@ const HEADER_BG = 'rgba(0,0,0,0.82)';
 const HITLINE_COLOR = '#ffffff';
 const HITLINE_GLOW = 'rgba(255,255,255,0.18)';
 
-const NOTE_COLORS = ['#00aaff', '#ffffff', '#00aaff', '#ffffff'];
-const NOTE_COLOR_SPECIAL = '#ffdd00';
-
 // Star rating colour thresholds (matches osu! website colouring)
 function starColor(stars: number): string {
-  if (stars < 2) return '#4fc3f7'; // light blue
-  if (stars < 3) return '#81c784'; // green
-  if (stars < 4) return '#ffee58'; // yellow
-  if (stars < 5) return '#ffa726'; // orange
-  if (stars < 6) return '#ef5350'; // red
-  if (stars < 7) return '#ab47bc'; // purple
-  return '#212121'; // black (expert+)
+  if (stars < 2) return '#4fc3f7';
+  if (stars < 3) return '#81c784';
+  if (stars < 4) return '#ffee58';
+  if (stars < 5) return '#ffa726';
+  if (stars < 6) return '#ef5350';
+  if (stars < 7) return '#ab47bc';
+  return '#212121';
 }
 
-function getNoteColor(col: number, keys: number): string {
+function getNoteColor(
+  col: number,
+  keys: number,
+  noteColors: string[],
+  noteColorSpecial: string,
+): string {
   const center = Math.floor(keys / 2);
-  if (keys % 2 === 1 && col === center) return NOTE_COLOR_SPECIAL;
-  return NOTE_COLORS[col % NOTE_COLORS.length] ?? '#00aaff';
-}
-
-function hexToRgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
+  if (keys % 2 === 1 && col === center) return noteColorSpecial;
+  return noteColors[col % noteColors.length] ?? '#00aaff';
 }
 
 // ─── Cover-crop helper (object-fit: cover) ────────────────────────────────────
 
-/**
- * Draws `img` into a rect on `ctx` using cover-fit semantics:
- * the image is scaled to fill the target rect, centred, and clipped.
- */
 function drawCoverFit(
   ctx: SKRSContext2D,
-  img: import('@napi-rs/canvas').Image,
+  img: Image,
   dx: number,
   dy: number,
   dw: number,
@@ -80,7 +78,7 @@ function drawCoverFit(
   ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
-// ─── Round-rect helper ─────────────────────────────────────────────────────────
+// ─── Round-rect helper (used for hold body/tail, hit line) ────────────────────
 
 function roundRect(
   ctx: SKRSContext2D,
@@ -104,17 +102,152 @@ function roundRect(
   ctx.closePath();
 }
 
+// ─── Asset-based note drawing ─────────────────────────────────────────────────
+
+/**
+ * Draws a note asset tinted to `color` at position (x, topY) with size (w, h).
+ *
+ * Tinting strategy (no pixel-by-pixel loop needed):
+ *   1. Draw the white asset onto a small offscreen canvas at exact target size.
+ *   2. Set composite to 'source-atop' and fill with the color — this paints
+ *      the color onto every non-transparent pixel of the asset.
+ *   3. Composite the result onto the main canvas with 'source-over'.
+ *
+ * Because the asset is white-on-transparent, the fill exactly follows the shape.
+ */
+function drawTintedAsset(
+  ctx: SKRSContext2D,
+  asset: Image,
+  color: string,
+  alpha: number,
+  x: number,
+  topY: number,
+  w: number,
+  h: number,
+): void {
+  // Offscreen canvas sized to the destination rect
+  const off = createCanvas(w, h);
+  const offCtx = off.getContext('2d');
+
+  // 1. Draw the white asset (scales to fill destination exactly)
+  offCtx.drawImage(asset, 0, 0, w, h);
+
+  // 2. Tint: paint color over non-transparent pixels only
+  offCtx.globalCompositeOperation = 'source-atop';
+  offCtx.fillStyle = color;
+  offCtx.fillRect(0, 0, w, h);
+
+  // 3. Composite onto main canvas
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(off, x, topY);
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * Resolves target draw rect for a note asset.
+ *
+ * - Bar:    full column width × NOTE_HEIGHT
+ * - Arrow:  full column width × ARROW_NOTE_HEIGHT (taller so chevron reads clearly)
+ * - Circle: colWidth × colWidth square (centred horizontally in column)
+ */
+function noteDrawRect(
+  style: NoteStyle,
+  x: number,
+  bottomY: number,
+  colWidth: number,
+): { x: number; topY: number; w: number; h: number } {
+  if (style === 'circle') {
+    return {
+      x,
+      topY: bottomY - colWidth,
+      w: colWidth,
+      h: colWidth,
+    };
+  }
+  if (style === 'arrow') {
+    // Square filling the full column width — same geometry as circle
+    return {
+      x,
+      topY: bottomY - colWidth,
+      w: colWidth,
+      h: colWidth,
+    };
+  }
+  // bar: full width × NOTE_HEIGHT
+  return { x, topY: bottomY - NOTE_HEIGHT, w: colWidth, h: NOTE_HEIGHT };
+}
+
+function drawNoteAsset(
+  ctx: SKRSContext2D,
+  skin: SkinMap,
+  style: NoteStyle,
+  x: number,
+  bottomY: number,
+  colWidth: number,
+  color: string,
+  alpha = 1,
+): void {
+  const asset = skin[style].note;
+  const { x: dx, topY, w, h } = noteDrawRect(style, x, bottomY, colWidth);
+  drawTintedAsset(ctx, asset, color, alpha, dx, topY, w, h);
+}
+
+function drawHoldHeadAsset(
+  ctx: SKRSContext2D,
+  skin: SkinMap,
+  style: NoteStyle,
+  x: number,
+  bottomY: number,
+  colWidth: number,
+  color: string,
+): void {
+  const asset = skin[style].holdHead;
+  const { x: dx, topY, w, h } = noteDrawRect(style, x, bottomY, colWidth);
+  drawTintedAsset(ctx, asset, color, 1, dx, topY, w, h);
+}
+
+function drawHoldTailAsset(
+  ctx: SKRSContext2D,
+  skin: SkinMap,
+  style: NoteStyle,
+  x: number,
+  tailY: number,
+  colWidth: number,
+  color: string,
+): void {
+  const asset = skin[style].holdTail;
+  // Tail is always rendered as a thin horizontal bar, 8px tall, centred on tailY
+  const tailH = 8;
+  drawTintedAsset(
+    ctx,
+    asset,
+    color,
+    0.85,
+    x,
+    tailY - tailH / 2,
+    colWidth,
+    tailH,
+  );
+}
+
 // ─── Main render function ──────────────────────────────────────────────────────
+
+export interface RenderOptions {
+  noteStyle?: NoteStyle;
+  noteColors?: string[];
+  noteColorSpecial?: string;
+}
 
 /**
  * Renders all frames for the mania preview video.
  *
- * @param meta       Parsed beatmap metadata including notes
- * @param coverImage Optional cover image as a Buffer (JPEG/PNG)
- * @param startMs    Map time (ms) at the first frame — typically 0 or slightly negative
- * @param durationMs How many milliseconds of video to generate
- * @param scrollMs   Visible time window (ms); smaller = faster scroll
- * @param onFrame    Callback with raw RGBA pixel data per frame
+ * @param meta         Parsed beatmap metadata including notes
+ * @param coverImage   Optional cover image as a Buffer (JPEG/PNG)
+ * @param startMs      Map time (ms) at the first frame
+ * @param durationMs   How many milliseconds of video to generate
+ * @param scrollMs     Visible time window (ms); smaller = faster scroll
+ * @param onFrame      Callback with raw RGBA pixel data per frame
+ * @param renderOpts   Per-user note style/colour overrides
  */
 export async function renderFrames(
   meta: BeatmapMeta,
@@ -127,6 +260,7 @@ export async function renderFrames(
     frameIndex: number,
     totalFrames: number,
   ) => Promise<void>,
+  renderOpts: RenderOptions = {},
 ): Promise<void> {
   const canvas = createCanvas(VIDEO_WIDTH, VIDEO_HEIGHT);
   const ctx = canvas.getContext('2d');
@@ -134,6 +268,11 @@ export async function renderFrames(
   const totalFrames = Math.ceil((durationMs / 1000) * FPS);
   const keys = Math.max(1, meta.keys);
   const colWidth = Math.floor((VIDEO_WIDTH - COL_GAP * (keys + 1)) / keys);
+
+  const noteStyle: NoteStyle = renderOpts.noteStyle ?? NOTE_STYLE_DEFAULT;
+  const noteColors: string[] = renderOpts.noteColors ?? NOTE_COLORS_DEFAULT;
+  const noteColorSpecial: string =
+    renderOpts.noteColorSpecial ?? NOTE_COLOR_SPECIAL_DEFAULT;
 
   function colX(col: number): number {
     return COL_GAP * (col + 1) + col * colWidth;
@@ -145,16 +284,19 @@ export async function renderFrames(
     return HITLINE_Y - fraction * PLAYFIELD_HEIGHT;
   }
 
-  // Pre-load cover image
-  let coverLoaded: import('@napi-rs/canvas').Image | null = null;
-  if (coverImage) {
-    try {
-      const { loadImage } = await import('@napi-rs/canvas');
-      coverLoaded = await loadImage(coverImage);
-    } catch {
-      // cover is optional
-    }
-  }
+  // Pre-load assets and cover image in parallel
+  const [skin, coverLoaded] = await Promise.all([
+    loadNoteAssets(),
+    (async (): Promise<Image | null> => {
+      if (!coverImage) return null;
+      try {
+        const { loadImage } = await import('@napi-rs/canvas');
+        return await loadImage(coverImage);
+      } catch {
+        return null;
+      }
+    })(),
+  ]);
 
   const starsText = `${meta.stars.toFixed(2)} ★`;
   const starCol = starColor(meta.stars);
@@ -170,7 +312,6 @@ export async function renderFrames(
       ctx.globalAlpha = 0.18;
       drawCoverFit(ctx, coverLoaded, 0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
       ctx.globalAlpha = 1;
-      // Darken overlay so notes stay legible
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
       ctx.fillRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
     }
@@ -190,9 +331,13 @@ export async function renderFrames(
       if (note.startTime > windowEnd) break;
       if (note.endTime < windowStart) continue;
 
-      const color = getNoteColor(note.column, keys);
+      const color = getNoteColor(
+        note.column,
+        keys,
+        noteColors,
+        noteColorSpecial,
+      );
       const x = colX(note.column);
-      const w = colWidth;
 
       if (note.isHold) {
         const startY = noteY(note.startTime, currentMs);
@@ -200,43 +345,48 @@ export async function renderFrames(
         const top = Math.min(startY, endY);
         const height = Math.abs(endY - startY);
 
-        // Hold body
-        ctx.fillStyle = hexToRgba(color, 0.4);
-        const bodyTop = Math.max(top, HEADER_HEIGHT);
-        const bodyH = Math.min(top + height, HITLINE_Y + NOTE_HEIGHT) - bodyTop;
+        // Style-appropriate note head height (notes scroll upward, head is at bottom)
+        const headH =
+          noteStyle === 'circle'
+            ? colWidth
+            : noteStyle === 'arrow'
+              ? colWidth
+              : NOTE_HEIGHT;
+
+        // Hold body — spans from the tail (top of screen) down to the top edge of
+        // the head cap, so the body never bleeds into the head asset.
+        // Coordinates: endY < startY (tail is higher on screen).
+        const bodyTop = Math.max(top, HEADER_HEIGHT); // top = endY (tail)
+        const bodyBottom = Math.min(startY - headH / 2, HITLINE_Y); // stop at centre of head
+        const bodyH = bodyBottom - bodyTop;
         if (bodyH > 0) {
-          ctx.fillRect(x + 2, bodyTop, w - 4, bodyH);
+          drawTintedAsset(
+            ctx,
+            skin[noteStyle].holdBody,
+            color,
+            0.4,
+            x + 2,
+            bodyTop,
+            colWidth - 4,
+            bodyH,
+          );
         }
 
-        // Head cap
-        if (
-          startY >= HEADER_HEIGHT - NOTE_HEIGHT &&
-          startY <= HITLINE_Y + NOTE_HEIGHT
-        ) {
-          ctx.fillStyle = color;
-          roundRect(ctx, x, startY - NOTE_HEIGHT, w, NOTE_HEIGHT, NOTE_RADIUS);
-          ctx.fill();
-          ctx.fillStyle = 'rgba(255,255,255,0.3)';
-          ctx.fillRect(x + 2, startY - NOTE_HEIGHT + 2, w - 4, 4);
+        // Hold head cap — only while above the hit line
+        if (startY >= HEADER_HEIGHT - headH && startY <= HITLINE_Y) {
+          drawHoldHeadAsset(ctx, skin, noteStyle, x, startY, colWidth, color);
         }
 
-        // Tail cap
-        if (endY >= HEADER_HEIGHT && endY <= HITLINE_Y + NOTE_HEIGHT) {
-          ctx.fillStyle = hexToRgba(color, 0.8);
-          roundRect(ctx, x, endY - 4, w, 8, NOTE_RADIUS);
-          ctx.fill();
+        // Hold tail cap
+        if (endY >= HEADER_HEIGHT && endY <= HITLINE_Y) {
+          drawHoldTailAsset(ctx, skin, noteStyle, x, endY, colWidth, color);
         }
       } else {
         const y = noteY(note.startTime, currentMs);
-        if (y < HEADER_HEIGHT - NOTE_HEIGHT || y > HITLINE_Y + NOTE_HEIGHT)
-          continue;
+        const noteH = noteStyle === 'bar' ? NOTE_HEIGHT : colWidth;
+        if (y < HEADER_HEIGHT - noteH || y > HITLINE_Y) continue;
 
-        ctx.fillStyle = color;
-        roundRect(ctx, x, y - NOTE_HEIGHT, w, NOTE_HEIGHT, NOTE_RADIUS);
-        ctx.fill();
-
-        ctx.fillStyle = 'rgba(255,255,255,0.4)';
-        ctx.fillRect(x + 2, y - NOTE_HEIGHT + 2, w - 4, 4);
+        drawNoteAsset(ctx, skin, noteStyle, x, y, colWidth, color);
       }
     }
 
@@ -271,12 +421,10 @@ export async function renderFrames(
     const badgeX = VIDEO_WIDTH - badgeW - 10;
     const badgeY = HEADER_HEIGHT / 2 - badgeH / 2;
 
-    // Pill background
     ctx.fillStyle = starCol;
     roundRect(ctx, badgeX, badgeY, badgeW, badgeH, badgeH / 2);
     ctx.fill();
 
-    // Text on pill — dark for light backgrounds, white otherwise
     const isLight = meta.stars < 3;
     ctx.fillStyle = isLight ? '#1a1a1a' : '#ffffff';
     ctx.fillText(starsText, badgeX + badgePad, badgeY + 15);

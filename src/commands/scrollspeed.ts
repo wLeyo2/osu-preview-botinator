@@ -12,19 +12,15 @@ import type { Command } from '@/utils/types/command';
 export const command: Command = {
   data: new SlashCommandBuilder()
     .setName('scrollspeed')
-    .setDescription(
-      'Set the mania note scroll speed for previews in this server',
-    )
+    .setDescription('Set your personal mania note scroll speed for previews')
     .addStringOption((opt) =>
       opt
         .setName('preset')
         .setDescription('Speed preset')
         .addChoices(
-          { name: 'Very Fast', value: 'very fast' },
           { name: 'Fast', value: 'fast' },
-          { name: 'Normal (default)', value: 'normal' },
+          { name: 'Medium (default)', value: 'medium' },
           { name: 'Slow', value: 'slow' },
-          { name: 'Very Slow', value: 'very slow' },
         ),
     )
     .addIntegerOption((opt) =>
@@ -37,23 +33,17 @@ export const command: Command = {
         .setMaxValue(SCROLL_MS_MAX),
     ),
   async execute(interaction) {
-    // Defer immediately — keeps the token alive while we process
     await interaction.deferReply({ ephemeral: true });
 
-    const guildId = interaction.guildId;
-    if (!guildId) {
-      await interaction.editReply('This command can only be used in a server.');
-      return;
-    }
-
+    const userId = interaction.user.id;
     const preset = interaction.options.getString('preset');
     const customMs = interaction.options.getInteger('ms');
 
     // No option given — show current
     if (!preset && !customMs) {
-      const current = getScrollMs(guildId);
+      const current = getScrollMs(userId);
       await interaction.editReply(
-        `Current scroll speed: **${current} ms** (${speedLabel(current)}). Lower = faster notes.\nUse \`/scrollspeed preset:\` or \`/scrollspeed ms:\` to change.`,
+        `Your scroll speed: **${current} ms** (${speedLabel(current)}). Lower = faster notes.\nUse \`/scrollspeed preset:\` or \`/scrollspeed ms:\` to change.`,
       );
       return;
     }
@@ -68,18 +58,16 @@ export const command: Command = {
       newMs = DEFAULT_SCROLL_MS;
     }
 
-    setScrollMs(guildId, newMs);
+    setScrollMs(userId, newMs);
 
     await interaction.editReply(
-      `Scroll speed set to **${newMs} ms** (${speedLabel(newMs)}) for this server.`,
+      `Scroll speed set to **${newMs} ms** (${speedLabel(newMs)}).`,
     );
   },
 };
 
 function speedLabel(ms: number): string {
-  if (ms <= 600) return 'very fast';
-  if (ms <= 1000) return 'fast';
-  if (ms <= 2000) return 'normal';
-  if (ms <= 3000) return 'slow';
-  return 'very slow';
+  if (ms <= 350) return 'fast';
+  if (ms <= 600) return 'medium';
+  return 'slow';
 }
