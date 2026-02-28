@@ -6,12 +6,9 @@ import { getAllFiles } from './getAllFiles';
 
 logger.info('Starting command deployment script...');
 
-if (!config.token) {
-  throw new Error('Missing required env variable: DISCORD_TOKEN');
-}
-if (!config.clientId) {
+if (!config.token) throw new Error('Missing required env variable: TOKEN');
+if (!config.clientId)
   throw new Error('Missing required env variable: CLIENT_ID');
-}
 
 const commands = [];
 const commandsPath = path.join(__dirname, '../..', 'commands');
@@ -35,7 +32,7 @@ if (commands.length === 0) {
 
 const rest = new REST().setToken(config.token);
 
-const isGlobalDeploy = process.argv.includes('--global');
+const isGlobalDeploy = process.argv.includes('--global') || !config.guildId;
 
 (async () => {
   try {
@@ -44,34 +41,43 @@ const isGlobalDeploy = process.argv.includes('--global');
     );
 
     if (isGlobalDeploy) {
-      logger.info('Deploying commands globally...');
+      if (!config.guildId) {
+        logger.info(
+          'GUILD_ID not set — deploying globally (may take up to 1 hour to propagate).',
+        );
+      } else {
+        logger.info('--global flag set — deploying globally.');
+      }
       await rest.put(Routes.applicationCommands(config.clientId), {
         body: commands,
       });
-      logger.info(
-        'Successfully deployed commands globally. It may take up to an hour to see changes.',
-      );
+      logger.info('Successfully deployed commands globally.');
     } else {
-      if (!config.guildId) {
-        throw new Error(
-          'Missing GUILD_ID env variable for guild-based deployment. Add it to .env and config.ts or use the --global flag.',
-        );
-      }
-
-      const guildIds = config.guildId.split(',').map((id) => id.trim());
-
-      logger.info(
-        `Deploying commands to ${guildIds.length} specified guilds...`,
-      );
+      const guildIds = config.guildId
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean);
+      logger.info(`Deploying commands to ${guildIds.length} guild(s)...`);
 
       for (const guildId of guildIds) {
-        await rest.put(
-          Routes.applicationGuildCommands(config.clientId, guildId),
-          {
-            body: commands,
-          },
-        );
-        logger.info(`Successfully reloaded commands for guild: ${guildId}`);
+        try {
+          await rest.put(
+            Routes.applicationGuildCommands(config.clientId, guildId),
+            { body: commands },
+          );
+          logger.info(`Successfully deployed commands to guild: ${guildId}`);
+        } catch (err: unknown) {
+          const code = (err as { code?: number })?.code;
+          if (code === 50001) {
+            logger.error(
+              `Guild ${guildId}: Missing Access (50001). ` +
+                `Make sure the bot is a member of this guild and the ID is correct. ` +
+                `Remove GUILD_ID from .env or use --global to deploy globally instead.`,
+            );
+          } else {
+            logger.error(`Guild ${guildId}: ${err}`);
+          }
+        }
       }
     }
   } catch (error) {

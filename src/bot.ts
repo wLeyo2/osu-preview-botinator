@@ -6,7 +6,11 @@ import { loadCommands } from './utils/loaders/commands';
 import { loadEvents } from './utils/loaders/events';
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent, // required to read message text for link detection
+  ],
 });
 
 (async () => {

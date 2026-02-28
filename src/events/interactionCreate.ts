@@ -35,16 +35,20 @@ export const event: Event<Events.InteractionCreate> = {
       await command.execute(interaction);
     } catch (error) {
       logger.error(error);
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({
-          content: 'There was an error while executing this command.',
-          flags: MessageFlags.Ephemeral,
-        });
-      } else {
-        await interaction.reply({
-          content: 'There was an error while executing this command.',
-          flags: MessageFlags.Ephemeral,
-        });
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({
+            content: 'There was an error while executing this command.',
+            flags: MessageFlags.Ephemeral,
+          });
+        } else {
+          await interaction.reply({
+            content: 'There was an error while executing this command.',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      } catch {
+        // Interaction token already expired — nothing we can do
       }
     }
   },
