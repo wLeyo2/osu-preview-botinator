@@ -70,20 +70,22 @@ export const event: Event<Events.MessageCreate> = {
         }
       }
 
-      // 2. Parse
+      // 2. Parse — extract everything needed from rawBeatmap then let it go.
+      // The string can be 100–500 KB and isn't needed past this point.
       const meta = parseBeatmap(rawBeatmap);
+      const previewTime = extractPreviewTime(rawBeatmap);
+      const audioFilename = extractAudioFilename(rawBeatmap);
+      // rawBeatmap is now eligible for GC (no further references below)
 
       if (!SUPPORTED_MODES.includes(meta.mode)) {
         await message.reply({ content: UNSUPPORTED_GAMEMODE });
         return;
       }
 
-      const previewTime = extractPreviewTime(rawBeatmap);
       const userPrefs = getUserPrefs(message.author.id);
       const scrollMs = getScrollMs(message.author.id);
 
       // 3. Fetch audio + cover in parallel
-      const audioFilename = extractAudioFilename(rawBeatmap);
       const [audio, coverImage] = await Promise.all([
         fetchAudioFromOsz(beatmapSetId, audioFilename),
         fetchCoverImage(beatmapSetId),

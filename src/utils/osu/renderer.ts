@@ -1,4 +1,4 @@
-import type { Image, SKRSContext2D } from '@napi-rs/canvas';
+import type { Canvas, Image, SKRSContext2D } from '@napi-rs/canvas';
 import { createCanvas } from '@napi-rs/canvas';
 import type { SkinMap } from './noteAssets';
 import { loadNoteAssets } from './noteAssets';
@@ -105,15 +105,35 @@ function roundRect(
 // ─── Asset-based note drawing ─────────────────────────────────────────────────
 
 /**
+ * Per-render cache of offscreen canvases keyed by "WxH".
+ * Reusing canvases eliminates thousands of native Skia allocations per encode,
+ * preventing the native-heap growth that isn't visible to the JS GC.
+ */
+type OffscreenCache = Map<string, { canvas: Canvas; ctx: SKRSContext2D }>;
+
+function getCachedCanvas(
+  cache: OffscreenCache,
+  w: number,
+  h: number,
+): { canvas: Canvas; ctx: SKRSContext2D } {
+  const key = `${w}x${h}`;
+  let entry = cache.get(key);
+  if (!entry) {
+    const canvas = createCanvas(w, h);
+    entry = { canvas, ctx: canvas.getContext('2d') };
+    cache.set(key, entry);
+  }
+  return entry;
+}
+
+/**
  * Draws a note asset tinted to `color` at position (x, topY) with size (w, h).
+ * Reuses a cached offscreen canvas to avoid allocating a new native canvas per call.
  *
- * Tinting strategy (no pixel-by-pixel loop needed):
- *   1. Draw the white asset onto a small offscreen canvas at exact target size.
- *   2. Set composite to 'source-atop' and fill with the color — this paints
- *      the color onto every non-transparent pixel of the asset.
- *   3. Composite the result onto the main canvas with 'source-over'.
- *
- * Because the asset is white-on-transparent, the fill exactly follows the shape.
+ * Tinting strategy:
+ *   1. Clear + draw the white asset onto the offscreen canvas.
+ *   2. source-atop fill with color — paints color onto non-transparent pixels only.
+ *   3. Composite result onto main canvas with source-over.
  */
 function drawTintedAsset(
   ctx: SKRSContext2D,
@@ -124,22 +144,64 @@ function drawTintedAsset(
   topY: number,
   w: number,
   h: number,
+  cache: OffscreenCache,
 ): void {
-  // Offscreen canvas sized to the destination rect
-  const off = createCanvas(w, h);
-  const offCtx = off.getContext('2d');
+  const { canvas: off, ctx: offCtx } = getCachedCanvas(cache, w, h);
 
-  // 1. Draw the white asset (scales to fill destination exactly)
+  offCtx.clearRect(0, 0, w, h);
+  offCtx.globalCompositeOperation = 'source-over';
   offCtx.drawImage(asset, 0, 0, w, h);
-
-  // 2. Tint: paint color over non-transparent pixels only
   offCtx.globalCompositeOperation = 'source-atop';
   offCtx.fillStyle = color;
   offCtx.fillRect(0, 0, w, h);
+  offCtx.globalCompositeOperation = 'source-over'; // reset for next use
 
-  // 3. Composite onto main canvas
   ctx.globalAlpha = alpha;
   ctx.drawImage(off, x, topY);
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * Draws a tinted hold-body asset clipped to `bodyH` pixels.
+ *
+ * The body asset is designed to be stretched vertically, so we render it
+ * once at full PLAYFIELD_HEIGHT into a cached canvas, then blit only the
+ * top `bodyH` rows onto the main canvas. This means hold body never
+ * allocates a new canvas regardless of how many holds or frames there are.
+ * Cache key: "body_W" — one entry per column width, shared across all frames.
+ */
+function drawBodyAsset(
+  ctx: SKRSContext2D,
+  asset: Image,
+  color: string,
+  alpha: number,
+  x: number,
+  bodyTop: number,
+  w: number,
+  bodyH: number,
+  cache: OffscreenCache,
+): void {
+  const key = `body_${w}`;
+  let entry = cache.get(key);
+  if (!entry) {
+    const canvas = createCanvas(w, PLAYFIELD_HEIGHT);
+    entry = { canvas, ctx: canvas.getContext('2d') };
+    cache.set(key, entry);
+  }
+  const { canvas: off, ctx: offCtx } = entry;
+
+  // Re-tint whenever color changes (cheap — just two fillRect calls)
+  offCtx.clearRect(0, 0, w, PLAYFIELD_HEIGHT);
+  offCtx.globalCompositeOperation = 'source-over';
+  offCtx.drawImage(asset, 0, 0, w, PLAYFIELD_HEIGHT);
+  offCtx.globalCompositeOperation = 'source-atop';
+  offCtx.fillStyle = color;
+  offCtx.fillRect(0, 0, w, PLAYFIELD_HEIGHT);
+  offCtx.globalCompositeOperation = 'source-over';
+
+  // Blit only the needed rows (source crop, no new allocation)
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(off, 0, 0, w, bodyH, x, bodyTop, w, bodyH);
   ctx.globalAlpha = 1;
 }
 
@@ -185,11 +247,12 @@ function drawNoteAsset(
   bottomY: number,
   colWidth: number,
   color: string,
+  cache: OffscreenCache,
   alpha = 1,
 ): void {
   const asset = skin[style].note;
   const { x: dx, topY, w, h } = noteDrawRect(style, x, bottomY, colWidth);
-  drawTintedAsset(ctx, asset, color, alpha, dx, topY, w, h);
+  drawTintedAsset(ctx, asset, color, alpha, dx, topY, w, h, cache);
 }
 
 function drawHoldHeadAsset(
@@ -200,10 +263,11 @@ function drawHoldHeadAsset(
   bottomY: number,
   colWidth: number,
   color: string,
+  cache: OffscreenCache,
 ): void {
   const asset = skin[style].holdHead;
   const { x: dx, topY, w, h } = noteDrawRect(style, x, bottomY, colWidth);
-  drawTintedAsset(ctx, asset, color, 1, dx, topY, w, h);
+  drawTintedAsset(ctx, asset, color, 1, dx, topY, w, h, cache);
 }
 
 function drawHoldTailAsset(
@@ -214,6 +278,7 @@ function drawHoldTailAsset(
   tailY: number,
   colWidth: number,
   color: string,
+  cache: OffscreenCache,
 ): void {
   const asset = skin[style].holdTail;
   // Tail is always rendered as a thin horizontal bar, 8px tall, centred on tailY
@@ -227,6 +292,7 @@ function drawHoldTailAsset(
     tailY - tailH / 2,
     colWidth,
     tailH,
+    cache,
   );
 }
 
@@ -301,6 +367,11 @@ export async function renderFrames(
   const starsText = `${meta.stars.toFixed(2)} ★`;
   const starCol = starColor(meta.stars);
 
+  // Offscreen canvas cache — reused across all frames to avoid per-note native allocations.
+  // Note/head/tail sizes are fixed for the whole render (colWidth is constant), so the cache
+  // only ever holds a small number of entries (~3 distinct sizes).
+  const offscreenCache: OffscreenCache = new Map();
+
   for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
     const currentMs = startMs + (frameIdx / FPS) * 1000;
 
@@ -360,7 +431,7 @@ export async function renderFrames(
         const bodyBottom = Math.min(startY - headH / 2, HITLINE_Y); // stop at centre of head
         const bodyH = bodyBottom - bodyTop;
         if (bodyH > 0) {
-          drawTintedAsset(
+          drawBodyAsset(
             ctx,
             skin[noteStyle].holdBody,
             color,
@@ -369,24 +440,52 @@ export async function renderFrames(
             bodyTop,
             colWidth - 4,
             bodyH,
+            offscreenCache,
           );
         }
 
         // Hold head cap — only while above the hit line
         if (startY >= HEADER_HEIGHT - headH && startY <= HITLINE_Y) {
-          drawHoldHeadAsset(ctx, skin, noteStyle, x, startY, colWidth, color);
+          drawHoldHeadAsset(
+            ctx,
+            skin,
+            noteStyle,
+            x,
+            startY,
+            colWidth,
+            color,
+            offscreenCache,
+          );
         }
 
         // Hold tail cap
         if (endY >= HEADER_HEIGHT && endY <= HITLINE_Y) {
-          drawHoldTailAsset(ctx, skin, noteStyle, x, endY, colWidth, color);
+          drawHoldTailAsset(
+            ctx,
+            skin,
+            noteStyle,
+            x,
+            endY,
+            colWidth,
+            color,
+            offscreenCache,
+          );
         }
       } else {
         const y = noteY(note.startTime, currentMs);
         const noteH = noteStyle === 'bar' ? NOTE_HEIGHT : colWidth;
         if (y < HEADER_HEIGHT - noteH || y > HITLINE_Y) continue;
 
-        drawNoteAsset(ctx, skin, noteStyle, x, y, colWidth, color);
+        drawNoteAsset(
+          ctx,
+          skin,
+          noteStyle,
+          x,
+          y,
+          colWidth,
+          color,
+          offscreenCache,
+        );
       }
     }
 

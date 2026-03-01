@@ -1,8 +1,14 @@
 import { Parse } from 'unzipper';
 import logger from '@/utils/logger';
 
-const CATBOY_DOWNLOAD_URL = (beatmapSetId: string) =>
-  `https://catboy.best/d/${beatmapSetId}`;
+/** Ordered list of mirrors tried in sequence until one succeeds. */
+const MIRRORS: Array<{ name: string; url: (id: string) => string }> = [
+  { name: 'catboy.best', url: (id) => `https://catboy.best/d/${id}` },
+  { name: 'nerinyan.moe', url: (id) => `https://api.nerinyan.moe/d/${id}` },
+  { name: 'osu.direct', url: (id) => `https://osu.direct/api/d/${id}` },
+];
+
+const MIRROR_TIMEOUT_MS = 20_000;
 
 /** Audio file extensions recognised inside .osz archives */
 const AUDIO_EXTENSIONS = ['.mp3', '.ogg', '.wav', '.flac'];
@@ -17,30 +23,56 @@ export interface AudioResult {
 }
 
 /**
- * Downloads the beatmapset archive from catboy.best and extracts
- * the audio file referenced by `audioFilename` in the .osu file.
- *
- * If `audioFilename` is not provided or not found, falls back to
- * the first audio file found in the archive.
+ * Downloads the beatmapset archive and extracts the audio file.
+ * Tries each mirror in order; moves to the next on any HTTP error or timeout.
+ * Throws if all mirrors fail.
  */
 export async function fetchAudioFromOsz(
   beatmapSetId: string,
   audioFilename?: string,
 ): Promise<AudioResult> {
-  const url = CATBOY_DOWNLOAD_URL(beatmapSetId);
-  logger.info(`Downloading beatmapset from ${url}`);
+  const failures: string[] = [];
 
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(
-      `Failed to download beatmapset ${beatmapSetId}: HTTP ${res.status}`,
-    );
+  for (const mirror of MIRRORS) {
+    const url = mirror.url(beatmapSetId);
+    logger.info(`Downloading beatmapset from ${mirror.name}: ${url}`);
+
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), MIRROR_TIMEOUT_MS);
+
+    try {
+      const res = await fetch(url, { signal: abort.signal });
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        const reason = `HTTP ${res.status}`;
+        logger.warn(
+          `[Mirror] ${mirror.name} failed (${reason}), trying next...`,
+        );
+        failures.push(`${mirror.name} (${reason})`);
+        continue;
+      }
+
+      const archiveBuffer = Buffer.from(await res.arrayBuffer());
+      // The underlying ArrayBuffer is released as soon as Buffer.from() wraps it.
+      // Extract audio then let archiveBuffer go out of scope immediately.
+      const result = await extractAudioFromBuffer(archiveBuffer, audioFilename);
+      return result;
+    } catch (err) {
+      clearTimeout(timer);
+      const reason = abort.signal.aborted
+        ? 'timeout'
+        : err instanceof Error
+          ? err.message
+          : String(err);
+      logger.warn(`[Mirror] ${mirror.name} failed (${reason}), trying next...`);
+      failures.push(`${mirror.name} (${reason})`);
+    }
   }
 
-  const arrayBuffer = await res.arrayBuffer();
-  const archiveBuffer = Buffer.from(arrayBuffer);
-
-  return extractAudioFromBuffer(archiveBuffer, audioFilename);
+  throw new Error(
+    `Failed to download beatmapset ${beatmapSetId} from all mirrors: ${failures.join(', ')}`,
+  );
 }
 
 async function extractAudioFromBuffer(

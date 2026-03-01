@@ -147,6 +147,9 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
   let strainValues: number[] = [];
   let strainSectionMs = 400; // rosu-pp-js default
   let rosuBeatmap: RosuBeatmap | null = null;
+  let difficulty: Difficulty | null = null;
+  let diffAttrs: ReturnType<Difficulty['calculate']> | null = null;
+  let strainsObj: Strains | null = null;
 
   try {
     rosuBeatmap = new RosuBeatmap(rawBeatmap);
@@ -156,12 +159,12 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
       rosuBeatmap.convert(GameMode.Mania);
     }
 
-    const difficulty = new Difficulty();
-    const diffAttrs = difficulty.calculate(rosuBeatmap);
+    difficulty = new Difficulty();
+    diffAttrs = difficulty.calculate(rosuBeatmap);
     stars = diffAttrs.stars;
 
     // Compute strain curve for the chart
-    const strainsObj: Strains = difficulty.strains(rosuBeatmap);
+    strainsObj = difficulty.strains(rosuBeatmap);
     strainSectionMs = strainsObj.sectionLength;
 
     // Pick the most relevant strain array for the mode
@@ -174,6 +177,11 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
       strainValues = Array.from(raw_strains);
     }
   } finally {
+    // Free all WASM-backed objects immediately — their memory lives on the WASM
+    // linear heap which doesn't shrink, so returning allocations promptly matters.
+    strainsObj?.free();
+    diffAttrs?.free();
+    difficulty?.free();
     rosuBeatmap?.free();
   }
 

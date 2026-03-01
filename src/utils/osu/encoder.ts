@@ -87,6 +87,9 @@ export async function encodeVideo(
   const audioPath = join(tmpdir(), `osu-audio-${randomUUID()}${audio.ext}`);
 
   await fs.writeFile(audioPath, audio.buffer);
+  // Drop the reference so the GC can reclaim the audio buffer (can be tens of MB)
+  // before the potentially long encode begins.
+  (audio as { buffer: Buffer | null }).buffer = null!;
 
   try {
     await runFfmpeg(
@@ -102,6 +105,10 @@ export async function encodeVideo(
     );
   } finally {
     await fs.unlink(audioPath).catch(() => {});
+    // Nudge V8 to collect canvas wrappers, cover Image, and other native-backed
+    // objects that accumulated during the render. Non-blocking — runs concurrently
+    // with the rest of the pipeline (Discord upload etc).
+    Bun.gc(false);
   }
 
   logger.info(`Video encoded: ${outPath}`);
