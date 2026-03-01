@@ -13,8 +13,16 @@ export type NoteStyle = 'bar' | 'circle' | 'arrow';
  */
 export type RenderMode = 'last4min' | 'preview';
 
+/**
+ * Which direction notes travel toward the hit line.
+ * - 'down': notes fall downward (hit line at bottom) — default, matches osu!mania
+ * - 'up':   notes rise upward (hit line at top)
+ */
+export type ScrollDirection = 'down' | 'up';
+
 export const NOTE_STYLE_DEFAULT: NoteStyle = 'bar';
 export const RENDER_MODE_DEFAULT: RenderMode = 'last4min';
+export const SCROLL_DIRECTION_DEFAULT: ScrollDirection = 'down';
 
 /** Default note colors — alternating blue/white with yellow for centre column */
 export const NOTE_COLORS_DEFAULT = ['#00aaff', '#ffffff', '#00aaff', '#ffffff'];
@@ -28,6 +36,8 @@ export interface UserPrefs {
   noteColorSpecial: string;
   /** How to pick the render window for long maps */
   renderMode: RenderMode;
+  /** Which direction notes travel toward the hit line */
+  scrollDirection: ScrollDirection;
 }
 
 const userPrefs = new Map<string, UserPrefs>();
@@ -38,6 +48,7 @@ function defaultPrefs(): UserPrefs {
     noteColors: [...NOTE_COLORS_DEFAULT],
     noteColorSpecial: NOTE_COLOR_SPECIAL_DEFAULT,
     renderMode: RENDER_MODE_DEFAULT,
+    scrollDirection: SCROLL_DIRECTION_DEFAULT,
   };
 }
 
@@ -77,6 +88,13 @@ export function setNoteColor(
 
 export function setRenderMode(userId: string, mode: RenderMode): void {
   ensureUser(userId).renderMode = mode;
+}
+
+export function setScrollDirection(
+  userId: string,
+  direction: ScrollDirection,
+): void {
+  ensureUser(userId).scrollDirection = direction;
 }
 
 /** Reset a user's preferences to defaults */

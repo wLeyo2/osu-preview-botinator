@@ -141,8 +141,8 @@ function runFfmpeg(
       .inputOptions([`-ss ${(audioSeekMs / 1000).toFixed(3)}`])
       .outputOptions([
         '-c:v libx264',
-        '-preset veryfast',
-        '-crf 25',
+        '-preset ultrafast',
+        '-crf 28',
         '-pix_fmt yuv420p',
         '-c:a aac',
         '-b:a 128k',

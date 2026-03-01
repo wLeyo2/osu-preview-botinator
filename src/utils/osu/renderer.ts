@@ -2,8 +2,8 @@ import type { Canvas, Image, SKRSContext2D } from '@napi-rs/canvas';
 import { createCanvas } from '@napi-rs/canvas';
 import type { SkinMap } from './noteAssets';
 import { loadNoteAssets } from './noteAssets';
-import type { BeatmapMeta } from './parseBeatmap';
-import type { NoteStyle } from './userPrefs';
+import type { BeatmapMeta, SvPoint } from './parseBeatmap';
+import type { NoteStyle, ScrollDirection } from './userPrefs';
 import {
   NOTE_COLOR_SPECIAL_DEFAULT,
   NOTE_COLORS_DEFAULT,
@@ -21,11 +21,145 @@ export const FPS = 60;
 export const DEFAULT_SCROLL_MS = 500;
 
 const HEADER_HEIGHT = 100;
-const HITLINE_Y = VIDEO_HEIGHT - 70;
-const PLAYFIELD_HEIGHT = HITLINE_Y - HEADER_HEIGHT;
+/** Downscroll: hit line near the bottom */
+const HITLINE_Y_DOWN = VIDEO_HEIGHT - 70;
+/** Upscroll: hit line just below the header */
+const HITLINE_Y_UP = HEADER_HEIGHT + 10;
 
 const COL_GAP = 2;
 const NOTE_HEIGHT = 22;
+
+/** Height of the playfield area (same for both scroll directions) */
+const PLAYFIELD_HEIGHT = HITLINE_Y_DOWN - HEADER_HEIGHT;
+
+// ─── SV (Scroll Velocity) helpers ─────────────────────────────────────────────
+
+/**
+ * Pre-computed cumulative SV table for fast per-note visual offset lookups.
+ * Each entry stores a time boundary and the cumulative SV-weighted ms from
+ * `tableStartMs` up to that boundary.
+ *
+ * This lets us compute the visual offset between any two times in O(log n)
+ * via binary search + linear interpolation, instead of O(n) per note per frame.
+ */
+interface SvTableEntry {
+  time: number;
+  /** Cumulative SV-weighted ms from tableStartMs to this entry's time. */
+  cumulative: number;
+  /** SV multiplier active from this entry's time until the next entry. */
+  svMultiplier: number;
+}
+
+/**
+ * Builds a cumulative SV lookup table covering [startMs, endMs].
+ *
+ * For maps with no SV points, returns a single entry with svMultiplier=1.0
+ * so the renderer behaves identically to the pre-SV code path.
+ */
+function buildSvTable(
+  svPoints: SvPoint[],
+  startMs: number,
+  endMs: number,
+): SvTableEntry[] {
+  // Determine active SV at each boundary within [startMs, endMs]
+  const boundaries: { time: number; svMultiplier: number }[] = [];
+
+  // Find the SV in effect at startMs
+  let initialSv = 1.0;
+  for (let i = svPoints.length - 1; i >= 0; i--) {
+    if ((svPoints[i]?.time ?? 0) <= startMs) {
+      initialSv = svPoints[i]?.svMultiplier ?? 1.0;
+      break;
+    }
+  }
+  boundaries.push({ time: startMs, svMultiplier: initialSv });
+
+  // Add all SV change boundaries within (startMs, endMs)
+  for (const pt of svPoints) {
+    if (pt.time > startMs && pt.time < endMs) {
+      boundaries.push({ time: pt.time, svMultiplier: pt.svMultiplier });
+    }
+  }
+  boundaries.push({
+    time: endMs,
+    svMultiplier: boundaries[boundaries.length - 1]?.svMultiplier ?? 1.0,
+  });
+
+  // Build cumulative table
+  const table: SvTableEntry[] = [];
+  let cumulative = 0;
+  for (let i = 0; i < boundaries.length - 1; i++) {
+    const cur = boundaries[i]!;
+    const next = boundaries[i + 1]!;
+    table.push({ time: cur.time, cumulative, svMultiplier: cur.svMultiplier });
+    cumulative += (next.time - cur.time) * cur.svMultiplier;
+  }
+  // Final boundary entry
+  table.push({
+    time: endMs,
+    cumulative,
+    svMultiplier: boundaries[boundaries.length - 1]?.svMultiplier ?? 1.0,
+  });
+
+  return table;
+}
+
+/**
+ * Returns the SV-weighted visual distance (in ms-equivalent units) between
+ * `fromMs` and `toMs`, using the pre-built SV table.
+ *
+ * Positive result = toMs is after fromMs.
+ * Can handle toMs < fromMs (returns negative value) for tail notes below head.
+ */
+function svVisualOffset(
+  table: SvTableEntry[],
+  fromMs: number,
+  toMs: number,
+): number {
+  if (table.length === 0) return toMs - fromMs;
+
+  const sign = toMs >= fromMs ? 1 : -1;
+  const lo = sign > 0 ? fromMs : toMs;
+  const hi = sign > 0 ? toMs : fromMs;
+
+  // Find the table segment containing lo
+  let loIdx = 0;
+  for (let i = table.length - 1; i >= 0; i--) {
+    if ((table[i]?.time ?? 0) <= lo) {
+      loIdx = i;
+      break;
+    }
+  }
+  // Find the table segment containing hi
+  let hiIdx = table.length - 1;
+  for (let i = table.length - 1; i >= 0; i--) {
+    if ((table[i]?.time ?? 0) <= hi) {
+      hiIdx = i;
+      break;
+    }
+  }
+
+  if (loIdx === hiIdx) {
+    // Both within the same segment — simple multiplication
+    return sign * (hi - lo) * (table[loIdx]?.svMultiplier ?? 1.0);
+  }
+
+  // Sum across segments
+  const loEntry = table[loIdx]!;
+  const loNextEntry = table[loIdx + 1]!;
+  let total = (loNextEntry.time - lo) * loEntry.svMultiplier;
+
+  for (let i = loIdx + 1; i < hiIdx; i++) {
+    const entry = table[i]!;
+    const nextEntry = table[i + 1]!;
+    total += (nextEntry.time - entry.time) * entry.svMultiplier;
+  }
+
+  const hiEntry = table[hiIdx]!;
+  total += (hi - hiEntry.time) * hiEntry.svMultiplier;
+
+  return sign * total;
+}
 
 // ─── Colour scheme ─────────────────────────────────────────────────────────────
 
@@ -302,6 +436,7 @@ export interface RenderOptions {
   noteStyle?: NoteStyle;
   noteColors?: string[];
   noteColorSpecial?: string;
+  scrollDirection?: ScrollDirection;
 }
 
 /**
@@ -339,16 +474,47 @@ export async function renderFrames(
   const noteColors: string[] = renderOpts.noteColors ?? NOTE_COLORS_DEFAULT;
   const noteColorSpecial: string =
     renderOpts.noteColorSpecial ?? NOTE_COLOR_SPECIAL_DEFAULT;
+  const scrollDirection: ScrollDirection = renderOpts.scrollDirection ?? 'down';
+
+  // Direction-dependent layout values
+  const hitLineY = scrollDirection === 'up' ? HITLINE_Y_UP : HITLINE_Y_DOWN;
+  // For downscroll: notes enter from the top (low Y) and travel to hitLineY at bottom.
+  // For upscroll:   notes enter from the bottom (high Y) and travel to hitLineY near top.
+  const noteEntryY =
+    scrollDirection === 'up' ? VIDEO_HEIGHT - 70 : HEADER_HEIGHT;
 
   function colX(col: number): number {
     return COL_GAP * (col + 1) + col * colWidth;
   }
 
+  /**
+   * Converts a note's map time to a canvas Y coordinate.
+   *
+   * With SV: uses the SV-weighted visual offset so sections with SV>1 appear
+   * further apart (faster) and SV<1 appear compressed (slower).
+   *
+   * Without SV (or standard maps): degrades to simple linear interpolation,
+   * identical to previous behaviour.
+   *
+   * Downscroll: hit line at bottom (HITLINE_Y_DOWN). Notes approaching have
+   *   larger msAhead → placed higher (smaller Y).
+   * Upscroll: hit line at top (HITLINE_Y_UP). Notes approaching have larger
+   *   msAhead → placed lower (larger Y).
+   */
   function noteY(noteTimeMs: number, currentMs: number): number {
-    const msAhead = noteTimeMs - currentMs;
-    const fraction = msAhead / scrollMs; // 0 = at hit line, 1 = top
-    return HITLINE_Y - fraction * PLAYFIELD_HEIGHT;
+    const visualMs = svVisualOffset(svTable, currentMs, noteTimeMs);
+    const fraction = visualMs / scrollMs; // 0=at hit line, positive=approaching
+    if (scrollDirection === 'up') {
+      // Notes below the hit line, moving upward
+      return hitLineY + fraction * PLAYFIELD_HEIGHT;
+    }
+    // Downscroll: notes above the hit line, moving downward
+    return hitLineY - fraction * PLAYFIELD_HEIGHT;
   }
+
+  // Build the SV lookup table once for the full render window.
+  // For standard maps or maps with no SV points this is a trivial 1-entry table.
+  const svTable = buildSvTable(meta.svPoints, startMs, startMs + durationMs);
 
   // Pre-load assets and cover image in parallel
   const [skin, coverLoaded] = await Promise.all([
@@ -413,10 +579,17 @@ export async function renderFrames(
       if (note.isHold) {
         const startY = noteY(note.startTime, currentMs);
         const endY = noteY(note.endTime, currentMs);
-        const top = Math.min(startY, endY);
-        const height = Math.abs(endY - startY);
 
-        // Style-appropriate note head height (notes scroll upward, head is at bottom)
+        // "Head" = the end closest to the hit line.
+        // Downscroll: startTime is the head (larger Y = closer to bottom hit line).
+        // Upscroll:   startTime is the head (smaller Y = closer to top hit line).
+        const headY = startY;
+        const tailY = endY;
+
+        const top = Math.min(headY, tailY);
+        const height = Math.abs(headY - tailY);
+
+        // Style-appropriate note head height
         const headH =
           noteStyle === 'circle'
             ? colWidth
@@ -424,11 +597,20 @@ export async function renderFrames(
               ? colWidth
               : NOTE_HEIGHT;
 
-        // Hold body — spans from the tail (top of screen) down to the top edge of
-        // the head cap, so the body never bleeds into the head asset.
-        // Coordinates: endY < startY (tail is higher on screen).
-        const bodyTop = Math.max(top, HEADER_HEIGHT); // top = endY (tail)
-        const bodyBottom = Math.min(startY - headH / 2, HITLINE_Y); // stop at centre of head
+        // Hold body — spans between tail and the centre of the head cap.
+        let bodyTop: number;
+        let bodyBottom: number;
+        if (scrollDirection === 'up') {
+          // Upscroll: head is at the top (smaller Y), tail is below (larger Y).
+          // Body runs from just below the head centre down to the tail.
+          bodyTop = Math.max(headY - headH / 2, HEADER_HEIGHT);
+          bodyBottom = Math.min(tailY, noteEntryY);
+        } else {
+          // Downscroll: head is at the bottom (larger Y), tail is above (smaller Y).
+          // Body runs from the tail down to just above the head centre.
+          bodyTop = Math.max(tailY, HEADER_HEIGHT);
+          bodyBottom = Math.min(headY - headH / 2, hitLineY);
+        }
         const bodyH = bodyBottom - bodyTop;
         if (bodyH > 0) {
           drawBodyAsset(
@@ -444,14 +626,18 @@ export async function renderFrames(
           );
         }
 
-        // Hold head cap — only while above the hit line
-        if (startY >= HEADER_HEIGHT - headH && startY <= HITLINE_Y) {
+        // Hold head cap
+        const headVisible =
+          scrollDirection === 'up'
+            ? headY >= HEADER_HEIGHT && headY <= noteEntryY + headH
+            : headY >= HEADER_HEIGHT - headH && headY <= hitLineY;
+        if (headVisible) {
           drawHoldHeadAsset(
             ctx,
             skin,
             noteStyle,
             x,
-            startY,
+            headY,
             colWidth,
             color,
             offscreenCache,
@@ -459,13 +645,17 @@ export async function renderFrames(
         }
 
         // Hold tail cap
-        if (endY >= HEADER_HEIGHT && endY <= HITLINE_Y) {
+        const tailVisible =
+          scrollDirection === 'up'
+            ? tailY >= HEADER_HEIGHT && tailY <= noteEntryY
+            : tailY >= HEADER_HEIGHT && tailY <= hitLineY;
+        if (tailVisible) {
           drawHoldTailAsset(
             ctx,
             skin,
             noteStyle,
             x,
-            endY,
+            tailY,
             colWidth,
             color,
             offscreenCache,
@@ -474,7 +664,11 @@ export async function renderFrames(
       } else {
         const y = noteY(note.startTime, currentMs);
         const noteH = noteStyle === 'bar' ? NOTE_HEIGHT : colWidth;
-        if (y < HEADER_HEIGHT - noteH || y > HITLINE_Y) continue;
+        const outOfBounds =
+          scrollDirection === 'up'
+            ? y < HEADER_HEIGHT || y > noteEntryY + noteH
+            : y < HEADER_HEIGHT - noteH || y > hitLineY;
+        if (outOfBounds) continue;
 
         drawNoteAsset(
           ctx,
@@ -491,9 +685,9 @@ export async function renderFrames(
 
     // ── Hit line ──────────────────────────────────────────────────────────────
     ctx.fillStyle = HITLINE_GLOW;
-    ctx.fillRect(0, HITLINE_Y - 8, VIDEO_WIDTH, 16);
+    ctx.fillRect(0, hitLineY - 8, VIDEO_WIDTH, 16);
     ctx.fillStyle = HITLINE_COLOR;
-    ctx.fillRect(0, HITLINE_Y - 1, VIDEO_WIDTH, 2);
+    ctx.fillRect(0, hitLineY - 1, VIDEO_WIDTH, 2);
 
     // ── Header ────────────────────────────────────────────────────────────────
     ctx.fillStyle = HEADER_BG;

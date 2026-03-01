@@ -1,5 +1,6 @@
 import { AttachmentBuilder, EmbedBuilder, Events } from 'discord.js';
 import { uploadVideoToR2 } from '@/r2';
+import config from '@/utils/config';
 import logger from '@/utils/logger';
 import { BEATMAP_URL_REGEX, SUPPORTED_MODES } from '@/utils/osu/constants';
 import {
@@ -34,6 +35,15 @@ export const event: Event<Events.MessageCreate> = {
   async execute(message) {
     if (message.author.bot) return;
     if (!message.guild) return;
+
+    // Guild allowlist: only process messages from configured guilds.
+    // Empty GUILD_ID = block all (fail-safe).
+    const allowedGuilds = config.guildId
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (allowedGuilds.length === 0 || !allowedGuilds.includes(message.guild.id))
+      return;
 
     const match = message.content.match(BEATMAP_URL_REGEX);
     if (!match) return;
@@ -102,6 +112,7 @@ export const event: Event<Events.MessageCreate> = {
           noteStyle: userPrefs.noteStyle,
           noteColors: userPrefs.noteColors,
           noteColorSpecial: userPrefs.noteColorSpecial,
+          scrollDirection: userPrefs.scrollDirection,
         },
         userPrefs.renderMode,
       );
@@ -141,7 +152,7 @@ export const event: Event<Events.MessageCreate> = {
         // attachment:// URL inside embeds
         .setImage('attachment://strain.png')
         .setFooter({
-          text: `osu!preview-botinator • scroll: ${scrollMs} ms • render: ${userPrefs.renderMode}`,
+          text: `osu!preview-botinator • scroll: ${scrollMs} ms • render: ${userPrefs.renderMode} • ${userPrefs.scrollDirection === 'up' ? '↑ upscroll' : '↓ downscroll'}`,
         });
 
       if (coverImage) {

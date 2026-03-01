@@ -11,6 +11,18 @@ export interface ManiaNote {
   isHold: boolean;
 }
 
+/** A single SV (scroll velocity) control point parsed from [TimingPoints]. */
+export interface SvPoint {
+  /** Time in milliseconds when this SV takes effect. */
+  time: number;
+  /**
+   * SV multiplier relative to the base scroll speed.
+   * Derived from inherited timing points: svMultiplier = -100 / beatLength.
+   * Always >= 0.01 (clamped to avoid zero/negative).
+   */
+  svMultiplier: number;
+}
+
 export interface BeatmapMeta {
   title: string;
   titleUnicode: string;
@@ -40,6 +52,12 @@ export interface BeatmapMeta {
   strainValues: number[];
   /** Duration of each strain section in ms */
   strainSectionMs: number;
+  /**
+   * SV control points from inherited timing points (green lines).
+   * Only populated for mania maps. Empty array = constant SV 1.0.
+   * Sorted ascending by time.
+   */
+  svPoints: SvPoint[];
 }
 
 function parseMetaField(raw: string, key: string): string {
@@ -185,8 +203,9 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
     rosuBeatmap?.free();
   }
 
-  // Parse mania notes for rendering
+  // Parse mania notes and SV points for rendering
   const notes = mode === 3 ? parseManiaObjects(rawBeatmap, keys) : [];
+  const svPoints = mode === 3 ? parseTimingPoints(rawBeatmap) : [];
 
   const drainSeconds = computeDrainSeconds(
     rawBeatmap,
@@ -211,7 +230,51 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
     notes,
     strainValues,
     strainSectionMs,
+    svPoints,
   };
+}
+
+/**
+ * Parses inherited timing points (green lines) from [TimingPoints] and
+ * returns SV control points for mania rendering.
+ *
+ * Inherited points have uninherited === 0. Their beatLength encodes the SV
+ * multiplier as a negative inverse percentage: svMultiplier = -100 / beatLength.
+ * e.g. beatLength = -50  → svMultiplier = 2.0 (notes move 2× faster)
+ *      beatLength = -200 → svMultiplier = 0.5 (notes move at half speed)
+ */
+function parseTimingPoints(raw: string): SvPoint[] {
+  const section = raw.split(/^\[TimingPoints\]/m)[1]?.split(/^\[/m)[0];
+  if (!section) return [];
+
+  const points: SvPoint[] = [];
+
+  for (const line of section.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    if (trimmed.startsWith('[')) break;
+
+    const parts = trimmed.split(',');
+    if (parts.length < 8) continue;
+
+    const time = parseFloat(parts[0] ?? '0');
+    const beatLength = parseFloat(parts[1] ?? '0');
+    const uninherited = parseInt(parts[6] ?? '1', 10);
+
+    if (isNaN(time) || isNaN(beatLength) || isNaN(uninherited)) continue;
+
+    // Only inherited (green) lines carry SV info. uninherited === 0 = green line.
+    if (uninherited !== 0) continue;
+    // beatLength must be negative for a valid inherited point
+    if (beatLength >= 0) continue;
+
+    const svMultiplier = Math.max(0.01, -100 / beatLength);
+    points.push({ time, svMultiplier });
+  }
+
+  // Ensure sorted by time (the format requires this, but be defensive)
+  points.sort((a, b) => a.time - b.time);
+  return points;
 }
 
 /** Minimal timing-only parse for non-mania maps (to compute drain time) */
