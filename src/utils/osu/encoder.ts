@@ -189,12 +189,19 @@ export async function fetchCoverImage(
   beatmapSetId: string,
 ): Promise<Buffer | null> {
   const url = `https://assets.ppy.sh/beatmaps/${beatmapSetId}/covers/cover@2x.jpg`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, config.render.coverFetchTimeoutMs);
+
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) return null;
     return Buffer.from(await res.arrayBuffer());
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

@@ -241,7 +241,8 @@ const worker = new Worker<RenderJobData, RenderResult>(
     const stageMs: Record<string, number> = {
       fetchBeatmap: 0,
       parseBeatmap: 0,
-      fetchAssets: 0,
+      audioFetch: 0,
+      coverFetch: 0,
       encodeVideo: 0,
       upload: 0,
       cacheWrite: 0,
@@ -285,14 +286,20 @@ const worker = new Worker<RenderJobData, RenderResult>(
       const previewTime = extractPreviewTime(rawBeatmap);
       const audioFilename = extractAudioFilename(rawBeatmap);
 
-      const fetchAssetsStart = performance.now();
-      const [audio, coverImage] = await Promise.all([
-        fetchAudioFromOsz(beatmapSetId, audioFilename),
-        fetchCoverImage(beatmapSetId),
-      ]);
-      stageMs.fetchAssets = Number(
-        (performance.now() - fetchAssetsStart).toFixed(2),
-      );
+      const audioTask = (async () => {
+        const startedAt = performance.now();
+        const audio = await fetchAudioFromOsz(beatmapSetId, audioFilename);
+        stageMs.audioFetch = Number((performance.now() - startedAt).toFixed(2));
+        return audio;
+      })();
+      const coverTask = (async () => {
+        const startedAt = performance.now();
+        const cover = await fetchCoverImage(beatmapSetId);
+        stageMs.coverFetch = Number((performance.now() - startedAt).toFixed(2));
+        return cover;
+      })();
+
+      const [audio, coverImage] = await Promise.all([audioTask, coverTask]);
 
       const encodeStart = performance.now();
       videoPath = await encodeVideo(
@@ -337,7 +344,7 @@ const worker = new Worker<RenderJobData, RenderResult>(
 
       logger.info(
         `[Worker] completed key=${renderKey} beatmap=${beatmapId} total=${totalMs}ms ` +
-          `stages(fetch=${stageMs.fetchBeatmap}ms parse=${stageMs.parseBeatmap}ms assets=${stageMs.fetchAssets}ms encode=${stageMs.encodeVideo}ms upload=${stageMs.upload}ms cache=${stageMs.cacheWrite}ms) ` +
+          `stages(fetch=${stageMs.fetchBeatmap}ms parse=${stageMs.parseBeatmap}ms audio=${stageMs.audioFetch}ms cover=${stageMs.coverFetch}ms encode=${stageMs.encodeVideo}ms upload=${stageMs.upload}ms cache=${stageMs.cacheWrite}ms) ` +
           `eventLoop(p95=${lagP95Ms}ms max=${lagMaxMs}ms) ` +
           `${formatMemory(memoryEnd)}`,
       );

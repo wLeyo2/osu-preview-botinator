@@ -1,18 +1,19 @@
 import { Readable } from 'node:stream';
 import { Parse } from 'unzipper';
+import config from '@/utils/config';
 import logger from '@/utils/logger';
 
-/** Ordered list of mirrors tried in sequence until one succeeds. */
+/** Ordered list of mirrors tried with hedged start delays. */
 const MIRRORS: Array<{ name: string; url: (id: string) => string }> = [
   { name: 'catboy.best', url: (id) => `https://catboy.best/d/${id}` },
   { name: 'nerinyan.moe', url: (id) => `https://api.nerinyan.moe/d/${id}` },
   { name: 'osu.direct', url: (id) => `https://osu.direct/api/d/${id}` },
 ];
 
-const MIRROR_TIMEOUT_MS = 20_000;
-
 /** Audio file extensions recognised inside .osz archives */
 const AUDIO_EXTENSIONS = ['.mp3', '.ogg', '.wav', '.flac'];
+
+const mirrorCooldownUntil = new Map<string, number>();
 
 export interface AudioResult {
   /** Raw audio bytes */
@@ -25,57 +26,186 @@ export interface AudioResult {
 
 /**
  * Downloads the beatmapset archive and extracts the audio file.
- * Tries each mirror in order; moves to the next on any HTTP error or timeout.
- * Throws if all mirrors fail.
+ * Mirrors are started with a hedge delay (mirror 2 starts shortly after mirror 1, etc.)
+ * so slow mirrors don't block the whole request.
  */
 export async function fetchAudioFromOsz(
   beatmapSetId: string,
   audioFilename?: string,
 ): Promise<AudioResult> {
   const failures: string[] = [];
+  const activeControllers = new Set<AbortController>();
+  let winnerSelected = false;
 
-  for (const mirror of MIRRORS) {
-    const url = mirror.url(beatmapSetId);
-    logger.info(`Downloading beatmapset from ${mirror.name}: ${url}`);
+  const attempts = MIRRORS.map((mirror, index) =>
+    (async (): Promise<AudioResult> => {
+      const delayMs = index * config.render.audioHedgeDelayMs;
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
 
-    const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), MIRROR_TIMEOUT_MS);
+      if (winnerSelected) {
+        throw new Error('skipped-after-winner');
+      }
 
-    try {
-      const res = await fetch(url, { signal: abort.signal });
-      clearTimeout(timer);
+      const cooldownRemainingSec = getMirrorCooldownRemainingSec(mirror.name);
+      if (cooldownRemainingSec > 0) {
+        const reason = `cooldown ${cooldownRemainingSec}s`;
+        failures.push(`${mirror.name} (${reason})`);
+        throw new Error(reason);
+      }
 
-      if (!res.ok) {
-        const reason = `HTTP ${res.status}`;
+      const controller = new AbortController();
+      activeControllers.add(controller);
+
+      try {
+        const result = await fetchAudioFromMirror(
+          mirror,
+          beatmapSetId,
+          audioFilename,
+          controller.signal,
+        );
+
+        winnerSelected = true;
+        clearMirrorCooldown(mirror.name);
+        return result;
+      } catch (error) {
+        if (winnerSelected && controller.signal.aborted) {
+          throw error;
+        }
+
+        const reason =
+          error instanceof Error
+            ? normalizeFailureReason(error.message)
+            : String(error);
         logger.warn(
           `[Mirror] ${mirror.name} failed (${reason}), trying next...`,
         );
         failures.push(`${mirror.name} (${reason})`);
-        continue;
+        applyMirrorCooldown(mirror.name);
+        throw error instanceof Error ? error : new Error(String(error));
+      } finally {
+        activeControllers.delete(controller);
       }
-
-      const archiveStream = toNodeReadable(res.body);
-      if (!archiveStream) {
-        throw new Error('Beatmap archive response has no readable body.');
-      }
-
-      const result = await extractAudioFromStream(archiveStream, audioFilename);
-      return result;
-    } catch (err) {
-      clearTimeout(timer);
-      const reason = abort.signal.aborted
-        ? 'timeout'
-        : err instanceof Error
-          ? err.message
-          : String(err);
-      logger.warn(`[Mirror] ${mirror.name} failed (${reason}), trying next...`);
-      failures.push(`${mirror.name} (${reason})`);
-    }
-  }
-
-  throw new Error(
-    `Failed to download beatmapset ${beatmapSetId} from all mirrors: ${failures.join(', ')}`,
+    })(),
   );
+
+  try {
+    const result = await Promise.any(attempts);
+
+    for (const controller of activeControllers) {
+      controller.abort();
+    }
+
+    return result;
+  } catch {
+    for (const controller of activeControllers) {
+      controller.abort();
+    }
+
+    throw new Error(
+      `Failed to download beatmapset ${beatmapSetId} from all mirrors: ${failures.join(', ')}`,
+    );
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function getMirrorCooldownRemainingSec(name: string): number {
+  const until = mirrorCooldownUntil.get(name) ?? 0;
+  if (until <= Date.now()) return 0;
+  return Math.ceil((until - Date.now()) / 1000);
+}
+
+function applyMirrorCooldown(name: string): void {
+  if (config.render.mirrorCooldownSec <= 0) return;
+
+  const until = Date.now() + config.render.mirrorCooldownSec * 1000;
+  mirrorCooldownUntil.set(name, until);
+}
+
+function clearMirrorCooldown(name: string): void {
+  mirrorCooldownUntil.delete(name);
+}
+
+function normalizeFailureReason(reason: string): string {
+  if (/aborted|aborterror/i.test(reason)) return 'aborted';
+  return reason;
+}
+
+async function fetchAudioFromMirror(
+  mirror: { name: string; url: (id: string) => string },
+  beatmapSetId: string,
+  audioFilename: string | undefined,
+  signal: AbortSignal,
+): Promise<AudioResult> {
+  const url = mirror.url(beatmapSetId);
+  logger.info(`Downloading beatmapset from ${mirror.name}: ${url}`);
+
+  const requestAbort = new AbortController();
+  let headerTimedOut = false;
+  let totalTimedOut = false;
+  let abortedByParent = false;
+
+  const onAbort = () => {
+    abortedByParent = true;
+    requestAbort.abort();
+  };
+
+  signal.addEventListener('abort', onAbort, { once: true });
+
+  const headerTimeout = setTimeout(() => {
+    headerTimedOut = true;
+    requestAbort.abort();
+  }, config.render.audioHeaderTimeoutMs);
+  const totalTimeout = setTimeout(() => {
+    totalTimedOut = true;
+    requestAbort.abort();
+  }, config.render.audioTotalTimeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: requestAbort.signal });
+    clearTimeout(headerTimeout);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const archiveStream = toNodeReadable(response.body);
+    if (!archiveStream) {
+      throw new Error('Beatmap archive response has no readable body.');
+    }
+
+    return await extractAudioFromStream(
+      archiveStream,
+      audioFilename,
+      requestAbort.signal,
+    );
+  } catch (error) {
+    if (headerTimedOut) {
+      throw new Error(
+        `header timeout (${config.render.audioHeaderTimeoutMs}ms)`,
+      );
+    }
+
+    if (totalTimedOut) {
+      throw new Error(`total timeout (${config.render.audioTotalTimeoutMs}ms)`);
+    }
+
+    if (abortedByParent) {
+      throw new Error('aborted');
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(headerTimeout);
+    clearTimeout(totalTimeout);
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 function toNodeReadable(
@@ -105,7 +235,8 @@ function toNodeReadable(
 
 async function extractAudioFromStream(
   archiveStream: Readable,
-  preferredFilename?: string,
+  preferredFilename: string | undefined,
+  signal: AbortSignal,
 ): Promise<AudioResult> {
   return new Promise((resolve, reject) => {
     const parser = Parse();
@@ -114,9 +245,26 @@ async function extractAudioFromStream(
     let streamFinished = false;
     let pendingEntries = 0;
     let fallbackCandidate: AudioResult | null = null;
+    let lastProgressAt = Date.now();
+
+    const stallCheckIntervalMs = Math.max(
+      500,
+      Math.floor(config.render.audioStallTimeoutMs / 2),
+    );
+    const stallTimer = setInterval(() => {
+      if (settled) return;
+      if (Date.now() - lastProgressAt < config.render.audioStallTimeoutMs)
+        return;
+      rejectOnce(
+        new Error(`stalled for ${config.render.audioStallTimeoutMs}ms`),
+      );
+    }, stallCheckIntervalMs);
 
     function cleanup(): void {
+      clearInterval(stallTimer);
+      signal.removeEventListener('abort', onAbort);
       archiveStream.removeAllListeners('error');
+      archiveStream.removeListener('data', onProgress);
       parser.removeAllListeners();
       archiveStream.unpipe(parser);
       parser.destroy();
@@ -145,7 +293,17 @@ async function extractAudioFromStream(
       rejectOnce(new Error('No audio file found in the beatmapset archive.'));
     }
 
+    function onProgress(): void {
+      lastProgressAt = Date.now();
+    }
+
+    function onAbort(): void {
+      rejectOnce(new Error('aborted'));
+    }
+
+    signal.addEventListener('abort', onAbort, { once: true });
     archiveStream.on('error', rejectOnce);
+    archiveStream.on('data', onProgress);
 
     parser.on('entry', (entry: import('unzipper').Entry) => {
       const filename = entry.path;
@@ -170,11 +328,11 @@ async function extractAudioFromStream(
       const chunks: Buffer[] = [];
 
       entry.on('data', (chunk: Buffer) => {
+        lastProgressAt = Date.now();
         chunks.push(chunk);
       });
 
       entry.on('error', rejectOnce);
-
       entry.on('end', () => {
         pendingEntries -= 1;
         if (settled) return;
