@@ -27,9 +27,9 @@
     "unzipper": "^0.12.3"
   },
   "scripts": {
-    "start": "bun ./src/start.ts",
-    "start:bot": "bun ./src/bot.ts",
-    "start:worker": "bun ./src/worker.ts",
+    "start": "bun --env-file=.env ./src/start.ts",
+    "start:bot": "bun --env-file=.env ./src/bot.ts",
+    "start:worker": "bun --env-file=.env ./src/worker.ts",
     "deploy": "bun ./src/utils/loaders/deploy.ts",
     "check": "bunx biome check --write",
     "generate:assets": "bun scripts/generateAssets.ts"

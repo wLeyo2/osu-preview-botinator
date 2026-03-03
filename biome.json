@@ -34,7 +34,15 @@
   },
   "overrides": [
     {
-      "includes": ["src/ojsama.js"],
+      "includes": [
+        "src/ojsama.js",
+        "ojsama.js",
+        "index.js",
+        "mania.js",
+        "osu.js",
+        "utils.js",
+        "canvas.js"
+      ],
       "linter": {
         "enabled": false
       },

@@ -1,5 +1,6 @@
 import { type Client, Events } from 'discord.js';
 import { startQueueNotifier } from '@/queue/notifier';
+import { startQueueTelemetry } from '@/queue/telemetry';
 import logger from '@/utils/logger';
 import type { Event } from '@/utils/types/event';
 
@@ -9,6 +10,7 @@ export const event: Event<Events.ClientReady> = {
 
   async execute(client: Client<true>) {
     await startQueueNotifier(client);
+    startQueueTelemetry();
 
     const totalUsers = client.guilds.cache.reduce(
       (a, g) => a + g.memberCount,

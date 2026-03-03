@@ -539,6 +539,36 @@ export async function renderFrames(
   const starsText = `${meta.stars.toFixed(2)} ★`;
   const starCol = starColor(meta.stars);
 
+  const titleLine = `${meta.artist} - ${meta.title}`;
+  const subTitleLine = `[${meta.version}]  •  ${keys}K`;
+  const mapperLine = `mapped by ${meta.creator}`;
+
+  ctx.font = 'bold 13px sans-serif';
+  const badgePad = 8;
+  const badgeH = 22;
+  const starTextW = ctx.measureText(starsText).width;
+  const badgeW = starTextW + badgePad * 2;
+  const badgeX = VIDEO_WIDTH - badgeW - 10;
+  const badgeY = HEADER_HEIGHT / 2 - badgeH / 2;
+
+  const noteCount = meta.notes.length;
+  const noteX: number[] = new Array(noteCount);
+  const noteColor: string[] = new Array(noteCount);
+  for (let noteIdx = 0; noteIdx < noteCount; noteIdx++) {
+    const note = meta.notes[noteIdx];
+    if (!note) continue;
+    noteX[noteIdx] = colX(note.column);
+    noteColor[noteIdx] = getNoteColor(
+      note.column,
+      keys,
+      noteColors,
+      noteColorSpecial,
+    );
+  }
+
+  let activeStart = 0;
+  let activeEnd = 0;
+
   // Offscreen canvas cache — reused across all frames to avoid per-note native allocations.
   // Note/head/tail sizes are fixed for the whole render (colWidth is constant), so the cache
   // only ever holds a small number of entries (~3 distinct sizes).
@@ -570,17 +600,25 @@ export async function renderFrames(
     const windowStart = currentMs - 200;
     const windowEnd = currentMs + scrollMs + 200;
 
-    for (const note of meta.notes) {
-      if (note.startTime > windowEnd) break;
-      if (note.endTime < windowStart) continue;
+    while (activeStart < noteCount) {
+      const note = meta.notes[activeStart];
+      if (!note || note.endTime >= windowStart) break;
+      activeStart++;
+    }
 
-      const color = getNoteColor(
-        note.column,
-        keys,
-        noteColors,
-        noteColorSpecial,
-      );
-      const x = colX(note.column);
+    if (activeEnd < activeStart) activeEnd = activeStart;
+    while (activeEnd < noteCount) {
+      const note = meta.notes[activeEnd];
+      if (!note || note.startTime > windowEnd) break;
+      activeEnd++;
+    }
+
+    for (let noteIdx = activeStart; noteIdx < activeEnd; noteIdx++) {
+      const note = meta.notes[noteIdx];
+      if (!note || note.endTime < windowStart) continue;
+
+      const color = noteColor[noteIdx] ?? '#ffffff';
+      const x = noteX[noteIdx] ?? 0;
 
       if (note.isHold) {
         const startY = noteY(note.startTime, currentMs);
@@ -698,24 +736,18 @@ export async function renderFrames(
 
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 15px sans-serif';
-    ctx.fillText(`${meta.artist} - ${meta.title}`, 12, 36, VIDEO_WIDTH - 24);
+    ctx.fillText(titleLine, 12, 36, VIDEO_WIDTH - 24);
 
     ctx.font = '12px sans-serif';
     ctx.fillStyle = '#cccccc';
-    ctx.fillText(`[${meta.version}]  •  ${keys}K`, 12, 56, VIDEO_WIDTH - 24);
+    ctx.fillText(subTitleLine, 12, 56, VIDEO_WIDTH - 24);
 
     ctx.fillStyle = '#888888';
     ctx.font = '11px sans-serif';
-    ctx.fillText(`mapped by ${meta.creator}`, 12, 74, VIDEO_WIDTH - 24);
+    ctx.fillText(mapperLine, 12, 74, VIDEO_WIDTH - 24);
 
     // ── Star rating badge (top-right of header) ───────────────────────────────
-    const badgePad = 8;
-    const badgeH = 22;
     ctx.font = 'bold 13px sans-serif';
-    const starTextW = ctx.measureText(starsText).width;
-    const badgeW = starTextW + badgePad * 2;
-    const badgeX = VIDEO_WIDTH - badgeW - 10;
-    const badgeY = HEADER_HEIGHT / 2 - badgeH / 2;
 
     ctx.fillStyle = starCol;
     roundRect(ctx, badgeX, badgeY, badgeW, badgeH, badgeH / 2);

@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { Parse } from 'unzipper';
 import logger from '@/utils/logger';
 
@@ -53,10 +54,12 @@ export async function fetchAudioFromOsz(
         continue;
       }
 
-      const archiveBuffer = Buffer.from(await res.arrayBuffer());
-      // The underlying ArrayBuffer is released as soon as Buffer.from() wraps it.
-      // Extract audio then let archiveBuffer go out of scope immediately.
-      const result = await extractAudioFromBuffer(archiveBuffer, audioFilename);
+      const archiveStream = toNodeReadable(res.body);
+      if (!archiveStream) {
+        throw new Error('Beatmap archive response has no readable body.');
+      }
+
+      const result = await extractAudioFromStream(archiveStream, audioFilename);
       return result;
     } catch (err) {
       clearTimeout(timer);
@@ -75,70 +78,133 @@ export async function fetchAudioFromOsz(
   );
 }
 
-async function extractAudioFromBuffer(
-  archiveBuffer: Buffer,
+function toNodeReadable(
+  body: ReadableStream<Uint8Array> | null,
+): Readable | null {
+  if (!body) return null;
+
+  if (typeof Readable.fromWeb === 'function') {
+    return Readable.fromWeb(body as globalThis.ReadableStream<Uint8Array>);
+  }
+
+  return Readable.from(
+    (async function* streamChunks() {
+      const reader = body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) yield value;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    })(),
+  );
+}
+
+async function extractAudioFromStream(
+  archiveStream: Readable,
   preferredFilename?: string,
 ): Promise<AudioResult> {
   return new Promise((resolve, reject) => {
-    const { Readable } = require('node:stream') as typeof import('node:stream');
-    const readable = Readable.from(archiveBuffer);
+    const parser = Parse();
 
-    let resolved = false;
-    const fallbackCandidates: {
-      filename: string;
-      ext: string;
-      chunks: Buffer[];
-    }[] = [];
+    let settled = false;
+    let streamFinished = false;
+    let pendingEntries = 0;
+    let fallbackCandidate: AudioResult | null = null;
 
-    readable
-      .pipe(Parse())
-      .on('entry', (entry: import('unzipper').Entry) => {
-        const filename = entry.path;
-        const ext = getExtension(filename).toLowerCase();
+    function cleanup(): void {
+      archiveStream.removeAllListeners('error');
+      parser.removeAllListeners();
+      archiveStream.unpipe(parser);
+      parser.destroy();
+    }
 
-        const isAudio = AUDIO_EXTENSIONS.includes(ext);
-        const isPreferred =
-          preferredFilename &&
-          filename.toLowerCase() === preferredFilename.toLowerCase();
+    function resolveOnce(result: AudioResult): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    }
 
-        if (!isAudio) {
-          entry.autodrain();
+    function rejectOnce(error: unknown): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+
+    function maybeResolveFallback(): void {
+      if (settled || !streamFinished || pendingEntries > 0) return;
+      if (fallbackCandidate) {
+        resolveOnce(fallbackCandidate);
+        return;
+      }
+      rejectOnce(new Error('No audio file found in the beatmapset archive.'));
+    }
+
+    archiveStream.on('error', rejectOnce);
+
+    parser.on('entry', (entry: import('unzipper').Entry) => {
+      const filename = entry.path;
+      const ext = getExtension(filename).toLowerCase();
+      const isAudio = AUDIO_EXTENSIONS.includes(ext);
+      if (!isAudio) {
+        entry.autodrain();
+        return;
+      }
+
+      const wantsPreferred =
+        Boolean(preferredFilename) &&
+        filename.toLowerCase() === preferredFilename?.toLowerCase();
+      const captureForFallback = !wantsPreferred && !fallbackCandidate;
+
+      if (!wantsPreferred && !captureForFallback) {
+        entry.autodrain();
+        return;
+      }
+
+      pendingEntries += 1;
+      const chunks: Buffer[] = [];
+
+      entry.on('data', (chunk: Buffer) => {
+        chunks.push(chunk);
+      });
+
+      entry.on('error', rejectOnce);
+
+      entry.on('end', () => {
+        pendingEntries -= 1;
+        if (settled) return;
+
+        const result: AudioResult = {
+          buffer: Buffer.concat(chunks),
+          ext,
+          filename,
+        };
+
+        if (wantsPreferred) {
+          resolveOnce(result);
           return;
         }
 
-        const chunks: Buffer[] = [];
-        entry.on('data', (chunk: Buffer) => chunks.push(chunk));
-        entry.on('end', () => {
-          const buf = Buffer.concat(chunks);
-
-          if (isPreferred && !resolved) {
-            resolved = true;
-            resolve({ buffer: buf, ext, filename });
-            return;
-          }
-
-          if (!isPreferred) {
-            fallbackCandidates.push({ filename, ext, chunks: [buf] });
-          }
-        });
-        entry.on('error', reject);
-      })
-      .on('finish', () => {
-        if (resolved) return;
-
-        // Use the first audio file found as fallback
-        const candidate = fallbackCandidates[0];
-        if (candidate) {
-          resolve({
-            buffer: Buffer.concat(candidate.chunks),
-            ext: candidate.ext,
-            filename: candidate.filename,
-          });
-        } else {
-          reject(new Error('No audio file found in the beatmapset archive.'));
+        if (!fallbackCandidate) {
+          fallbackCandidate = result;
         }
-      })
-      .on('error', reject);
+
+        maybeResolveFallback();
+      });
+    });
+
+    parser.on('error', rejectOnce);
+    parser.on('close', () => {
+      streamFinished = true;
+      maybeResolveFallback();
+    });
+
+    archiveStream.pipe(parser);
   });
 }
 

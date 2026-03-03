@@ -8,7 +8,12 @@ import {
   removeChannelSubscription,
 } from '@/queue/store';
 import type { RenderJobData } from '@/queue/types';
-import { enqueueRenderJob } from '@/queue/videoQueue';
+import {
+  enqueueRenderJob,
+  estimateQueueWaitSeconds,
+  getQueueBacklog,
+  getRenderJobState,
+} from '@/queue/videoQueue';
 import config from '@/utils/config';
 import { Cooldown } from '@/utils/cooldown';
 import logger from '@/utils/logger';
@@ -126,6 +131,42 @@ export const event: Event<Events.MessageCreate> = {
         return;
       }
 
+      const [jobState, backlogBefore] = await Promise.all([
+        getRenderJobState(renderKey),
+        getQueueBacklog(),
+      ]);
+      const hasInFlightJob =
+        jobState === 'waiting' ||
+        jobState === 'active' ||
+        jobState === 'delayed';
+      const queueSaturated =
+        backlogBefore.totalPending >= config.queue.maxBacklog;
+
+      if (queueSaturated && !hasInFlightJob) {
+        const shouldNotice = await acquireQueueNoticeWindow(
+          renderKey,
+          message.guild.id,
+          message.channel.id,
+        );
+
+        if (shouldNotice) {
+          const etaSec = estimateQueueWaitSeconds(backlogBefore);
+          const etaMinutes = Math.max(1, Math.ceil(etaSec / 60));
+          await message
+            .reply({
+              content:
+                `Render queue is currently full (${backlogBefore.totalPending}/${config.queue.maxBacklog}). ` +
+                `Please retry in a few minutes (estimated wait ~${etaMinutes} min).`,
+            })
+            .catch(() => {});
+        }
+
+        logger.warn(
+          `[Render rejected] beatmap=${beatmapId} key=${renderKey} backlog=${backlogBefore.totalPending} limit=${config.queue.maxBacklog}`,
+        );
+        return;
+      }
+
       await addChannelSubscription(
         renderKey,
         message.guild.id,
@@ -144,7 +185,14 @@ export const event: Event<Events.MessageCreate> = {
         renderOpts,
       };
 
-      const { created } = await enqueueRenderJob(renderKey, jobData);
+      const { created } = hasInFlightJob
+        ? { created: false }
+        : await enqueueRenderJob(renderKey, jobData);
+
+      const backlogAfter = await getQueueBacklog();
+      const etaSec = estimateQueueWaitSeconds(backlogAfter);
+      const etaMinutes = Math.max(1, Math.ceil(etaSec / 60));
+      const queueDepth = `${backlogAfter.totalPending}/${config.queue.maxBacklog}`;
 
       const shouldNotice = await acquireQueueNoticeWindow(
         renderKey,
@@ -155,8 +203,8 @@ export const event: Event<Events.MessageCreate> = {
         await message
           .reply({
             content: created
-              ? 'Render queued. I will post the video URL in this channel when it is ready.'
-              : 'This preview is already rendering. I will post the video URL here when it is ready.',
+              ? `Render queued (queue ${queueDepth}, ETA ~${etaMinutes} min). I will post the video URL in this channel when it is ready.`
+              : `This preview is already rendering (queue ${queueDepth}, ETA ~${etaMinutes} min). I will post the video URL here when it is ready.`,
           })
           .catch(() => {});
       }

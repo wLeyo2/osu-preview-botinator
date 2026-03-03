@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { createReadStream, statSync } from 'node:fs';
 import config from '@/utils/config';
 import logger from '@/utils/logger';
 
@@ -197,15 +197,22 @@ async function uploadAttempt(
       `[R2 Upload] Headers: ${JSON.stringify(headersForFetch, null, 2)}`,
     );
 
-    logger.debug('[R2 Upload] Reading file into buffer...');
-    const fileBuffer = readFileSync(filePath);
-    logger.debug('[R2 Upload] File read, starting upload...');
+    logger.debug('[R2 Upload] Streaming file upload...');
+    const fileStream = createReadStream(filePath);
+
+    const abortStream = () => {
+      fileStream.destroy(new Error('Upload aborted'));
+    };
+    abortController.signal.addEventListener('abort', abortStream, {
+      once: true,
+    });
 
     const uploadPromise = fetch(uploadUrl, {
       method: 'PUT',
       headers: headersForFetch,
-      body: fileBuffer,
+      body: fileStream,
       signal: abortController.signal,
+      duplex: 'half',
     });
 
     let lastProgress = 0;
@@ -223,6 +230,7 @@ async function uploadAttempt(
       const response = await uploadPromise;
 
       clearInterval(progressInterval);
+      abortController.signal.removeEventListener('abort', abortStream);
 
       logger.debug(
         `[R2 Upload] Response status: ${response.status} ${response.statusText}`,
@@ -241,6 +249,7 @@ async function uploadAttempt(
       return `${config.r2.publicUrl}/${fileName}`;
     } catch (uploadError) {
       clearInterval(progressInterval);
+      abortController.signal.removeEventListener('abort', abortStream);
       throw uploadError;
     }
   } finally {

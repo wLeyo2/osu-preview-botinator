@@ -8,13 +8,7 @@ let redis: IORedis | null = null;
 
 function getRedis(): IORedis {
   if (!redis) {
-    redis = createRedisConnection();
-    redis.on('error', (err) => {
-      logger.error(`[Redis store] ${err.message}`);
-    });
-    redis.on('end', () => {
-      logger.error('[Redis store] connection closed');
-    });
+    redis = createRedisConnection('redis-store');
   }
 
   return redis;

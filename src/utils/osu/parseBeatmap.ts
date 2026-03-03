@@ -111,6 +111,7 @@ function parseManiaObjects(raw: string, keys: number): ManiaNote[] {
     notes.push({ column, startTime, endTime, isHold });
   }
 
+  notes.sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
   return notes;
 }
 

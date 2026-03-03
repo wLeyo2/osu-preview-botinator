@@ -106,10 +106,6 @@ export async function encodeVideo(
     );
   } finally {
     await fs.unlink(audioPath).catch(() => {});
-    // Nudge V8 to collect canvas wrappers, cover Image, and other native-backed
-    // objects that accumulated during the render. Non-blocking — runs concurrently
-    // with the rest of the pipeline (Discord upload etc).
-    Bun.gc(false);
   }
 
   logger.info(`Video encoded: ${outPath}`);

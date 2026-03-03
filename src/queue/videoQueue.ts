@@ -56,6 +56,72 @@ export async function closeQueueClients(): Promise<void> {
   await Promise.allSettled([queueEvents.close(), videoQueue.close()]);
 }
 
+export interface QueueBacklog {
+  waiting: number;
+  active: number;
+  delayed: number;
+  prioritized: number;
+  paused: number;
+  totalPending: number;
+}
+
+export async function getQueueBacklog(): Promise<QueueBacklog> {
+  const counts = await videoQueue.getJobCounts(
+    'waiting',
+    'active',
+    'delayed',
+    'prioritized',
+    'paused',
+  );
+
+  const waiting = counts.waiting ?? 0;
+  const active = counts.active ?? 0;
+  const delayed = counts.delayed ?? 0;
+  const prioritized = counts.prioritized ?? 0;
+  const paused = counts.paused ?? 0;
+
+  return {
+    waiting,
+    active,
+    delayed,
+    prioritized,
+    paused,
+    totalPending: waiting + active + delayed + prioritized + paused,
+  };
+}
+
+export function estimateQueueWaitSeconds(backlog: QueueBacklog): number {
+  const effectiveWorkers = Math.max(1, config.queue.workerConcurrency);
+  const queuedAhead = backlog.waiting + backlog.delayed + backlog.prioritized;
+  const estimatedJobsAhead = queuedAhead + Math.max(0, backlog.active - 1);
+  const estimatedSeconds =
+    (estimatedJobsAhead * config.queue.estimatedJobSec) / effectiveWorkers;
+
+  return Math.max(0, Math.round(estimatedSeconds));
+}
+
+export async function getRenderJobState(
+  renderKey: string,
+): Promise<
+  'missing' | 'waiting' | 'active' | 'delayed' | 'completed' | 'failed'
+> {
+  const job = await videoQueue.getJob(renderKey);
+  if (!job) return 'missing';
+
+  const state = await job.getState();
+  if (
+    state === 'waiting' ||
+    state === 'active' ||
+    state === 'delayed' ||
+    state === 'completed' ||
+    state === 'failed'
+  ) {
+    return state;
+  }
+
+  return 'waiting';
+}
+
 queueEvents.on('error', (err: Error) => {
   logger.error(`QueueEvents error: ${err.message}`);
 });
