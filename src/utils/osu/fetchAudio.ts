@@ -80,7 +80,7 @@ async function extractAudioFromBuffer(
   preferredFilename?: string,
 ): Promise<AudioResult> {
   return new Promise((resolve, reject) => {
-    const { Readable } = require('stream') as typeof import('stream');
+    const { Readable } = require('node:stream') as typeof import('node:stream');
     const readable = Readable.from(archiveBuffer);
 
     let resolved = false;

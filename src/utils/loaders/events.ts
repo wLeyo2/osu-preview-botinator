@@ -10,9 +10,17 @@ export const loadEvents = async (client: Client, dir: string) => {
 
     if ('name' in event && 'execute' in event) {
       if (event.once) {
-        client.once(event.name, (...args) => event.execute(...args));
+        client.once(event.name, (...args) => {
+          Promise.resolve(event.execute(...args)).catch((err) =>
+            logger.error(err),
+          );
+        });
       } else {
-        client.on(event.name, (...args) => event.execute(...args));
+        client.on(event.name, (...args) => {
+          Promise.resolve(event.execute(...args)).catch((err) =>
+            logger.error(err),
+          );
+        });
       }
     } else {
       logger.warn(`invalid event file: ${file}`);

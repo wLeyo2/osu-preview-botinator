@@ -1,9 +1,10 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import ffmpeg from 'fluent-ffmpeg';
-import { promises as fs } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { PassThrough } from 'stream';
+import config from '@/utils/config';
 import logger from '@/utils/logger';
 import type { AudioResult } from './fetchAudio';
 import type { BeatmapMeta } from './parseBeatmap';
@@ -89,7 +90,7 @@ export async function encodeVideo(
   await fs.writeFile(audioPath, audio.buffer);
   // Drop the reference so the GC can reclaim the audio buffer (can be tens of MB)
   // before the potentially long encode begins.
-  (audio as { buffer: Buffer | null }).buffer = null!;
+  (audio as { buffer: Buffer | null }).buffer = null;
 
   try {
     await runFfmpeg(
@@ -141,6 +142,7 @@ function runFfmpeg(
       .inputOptions([`-ss ${(audioSeekMs / 1000).toFixed(3)}`])
       .outputOptions([
         '-c:v libx264',
+        `-threads ${config.render.ffmpegThreads}`,
         '-preset ultrafast',
         '-crf 28',
         '-pix_fmt yuv420p',

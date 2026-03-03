@@ -89,8 +89,9 @@ function buildSvTable(
   const table: SvTableEntry[] = [];
   let cumulative = 0;
   for (let i = 0; i < boundaries.length - 1; i++) {
-    const cur = boundaries[i]!;
-    const next = boundaries[i + 1]!;
+    const cur = boundaries[i];
+    const next = boundaries[i + 1];
+    if (!cur || !next) continue;
     table.push({ time: cur.time, cumulative, svMultiplier: cur.svMultiplier });
     cumulative += (next.time - cur.time) * cur.svMultiplier;
   }
@@ -145,17 +146,22 @@ function svVisualOffset(
   }
 
   // Sum across segments
-  const loEntry = table[loIdx]!;
-  const loNextEntry = table[loIdx + 1]!;
+  const loEntry = table[loIdx];
+  const loNextEntry = table[loIdx + 1];
+  if (!loEntry || !loNextEntry) {
+    return sign * (hi - lo);
+  }
   let total = (loNextEntry.time - lo) * loEntry.svMultiplier;
 
   for (let i = loIdx + 1; i < hiIdx; i++) {
-    const entry = table[i]!;
-    const nextEntry = table[i + 1]!;
+    const entry = table[i];
+    const nextEntry = table[i + 1];
+    if (!entry || !nextEntry) continue;
     total += (nextEntry.time - entry.time) * entry.svMultiplier;
   }
 
-  const hiEntry = table[hiIdx]!;
+  const hiEntry = table[hiIdx];
+  if (!hiEntry) return sign * total;
   total += (hi - hiEntry.time) * hiEntry.svMultiplier;
 
   return sign * total;
@@ -585,9 +591,6 @@ export async function renderFrames(
         // Upscroll:   startTime is the head (smaller Y = closer to top hit line).
         const headY = startY;
         const tailY = endY;
-
-        const top = Math.min(headY, tailY);
-        const height = Math.abs(headY - tailY);
 
         // Style-appropriate note head height
         const headH =

@@ -1,21 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
-
-function getEnvVar(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
-const config = {
-  endpoint: getEnvVar('CLOUD_ENDPOINT'),
-  accessKeyId: getEnvVar('CLOUD_ACCESKEY'),
-  secretAccessKey: getEnvVar('CLOUD_SECRETKEY'),
-  publicUrl: getEnvVar('R2_PUBLIC_URL'),
-  bucket: getEnvVar('R2_BUCKET'),
-};
+import config from '@/utils/config';
+import logger from '@/utils/logger';
 
 const UPLOAD_TIMEOUT_MS = 90_000; // 1.5 minutes
 const MAX_RETRY_ATTEMPTS = 1; // Only retry once (2 total attempts)
@@ -105,7 +91,7 @@ function createSignatureV4(
   ].join('\n');
 
   const kDate = getHmac(
-    Buffer.from(`AWS4${config.secretAccessKey}`),
+    Buffer.from(`AWS4${config.r2.secretAccessKey}`),
     dateStamp,
   );
   const kRegion = getHmac(kDate, region);
@@ -115,7 +101,7 @@ function createSignatureV4(
   const signature = hexEncode(getHmac(kSigning, stringToSign));
 
   const authorizationHeader =
-    `AWS4-HMAC-SHA256 Credential=${config.accessKeyId}/${credentialScope},` +
+    `AWS4-HMAC-SHA256 Credential=${config.r2.accessKeyId}/${credentialScope},` +
     `SignedHeaders=${signedHeaders},Signature=${signature}`;
 
   return { signature, authorizationHeader, signedHeaders };
@@ -128,30 +114,28 @@ export async function uploadVideoToR2(
   const startTime = Date.now();
   const fileSize = statSync(filePath).size;
 
-  console.log(
+  logger.info(
     `[R2 Upload] Starting upload: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)} MB)`,
   );
 
   for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS + 1; attempt++) {
     try {
-      console.log(`[R2 Upload] Attempt ${attempt}/${MAX_RETRY_ATTEMPTS + 1}`);
+      logger.info(`[R2 Upload] Attempt ${attempt}/${MAX_RETRY_ATTEMPTS + 1}`);
       const result = await uploadAttempt(filePath, fileName, fileSize);
       const duration = Date.now() - startTime;
-      console.log(
+      logger.info(
         `[R2 Upload] Upload completed in ${(duration / 1000).toFixed(2)}s`,
       );
       return result;
     } catch (error) {
-      console.error(
-        `[R2 Upload] Attempt ${attempt} failed:`,
-        error instanceof Error ? error.message : String(error),
-      );
+      const reason = error instanceof Error ? error.message : String(error);
+      logger.error(`[R2 Upload] Attempt ${attempt} failed: ${reason}`);
 
       if (attempt <= MAX_RETRY_ATTEMPTS) {
-        console.log(`[R2 Upload] Retrying in 2 seconds...`);
+        logger.warn('[R2 Upload] Retrying in 2 seconds...');
         await new Promise((resolve) => setTimeout(resolve, 2000));
       } else {
-        console.error(`[R2 Upload] All attempts failed for ${fileName}`);
+        logger.error(`[R2 Upload] All attempts failed for ${fileName}`);
         return null;
       }
     }
@@ -168,16 +152,16 @@ async function uploadAttempt(
   const attemptStartTime = Date.now();
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => {
-    console.log(
+    logger.warn(
       `[R2 Upload] Upload timeout after ${UPLOAD_TIMEOUT_MS}ms, aborting...`,
     );
     abortController.abort();
   }, UPLOAD_TIMEOUT_MS);
 
   try {
-    const url = new URL(config.endpoint);
+    const url = new URL(config.r2.endpoint);
     const host = url.host;
-    const path = `/${config.bucket}/${fileName}`;
+    const path = `/${config.r2.bucket}/${fileName}`;
 
     const date = new Date();
     const amzDate = getAmzDate(date);
@@ -207,16 +191,15 @@ async function uploadAttempt(
       'content-length': String(fileSize),
     };
 
-    const uploadUrl = `${config.endpoint}${path}`;
-    console.log(`[R2 Upload] PUT request to: ${uploadUrl}`);
-    console.log(
-      `[R2 Upload] Headers:`,
-      JSON.stringify(headersForFetch, null, 2),
+    const uploadUrl = `${config.r2.endpoint}${path}`;
+    logger.debug(`[R2 Upload] PUT request to: ${uploadUrl}`);
+    logger.debug(
+      `[R2 Upload] Headers: ${JSON.stringify(headersForFetch, null, 2)}`,
     );
 
-    console.log(`[R2 Upload] Reading file into buffer...`);
+    logger.debug('[R2 Upload] Reading file into buffer...');
     const fileBuffer = readFileSync(filePath);
-    console.log(`[R2 Upload] File read, starting upload...`);
+    logger.debug('[R2 Upload] File read, starting upload...');
 
     const uploadPromise = fetch(uploadUrl, {
       method: 'PUT',
@@ -230,7 +213,7 @@ async function uploadAttempt(
       const elapsed = Date.now() - attemptStartTime;
       if (elapsed > lastProgress + 5000) {
         lastProgress = elapsed;
-        console.log(
+        logger.debug(
           `[R2 Upload] Still uploading... (${elapsed / 1000}s elapsed)`,
         );
       }
@@ -241,22 +224,21 @@ async function uploadAttempt(
 
       clearInterval(progressInterval);
 
-      console.log(
+      logger.debug(
         `[R2 Upload] Response status: ${response.status} ${response.statusText}`,
       );
-      console.log(
-        `[R2 Upload] Response headers:`,
-        JSON.stringify(Object.fromEntries(response.headers.entries()), null, 2),
+      logger.debug(
+        `[R2 Upload] Response headers: ${JSON.stringify(Object.fromEntries(response.headers.entries()), null, 2)}`,
       );
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`[R2 Upload] Server response:`, errorText);
+        logger.error(`[R2 Upload] Server response: ${errorText}`);
         throw new Error(`HTTP ${response.status}: ${errorText}`);
       }
 
-      console.log(`[R2 Upload] Upload successful`);
-      return `${config.publicUrl}/${fileName}`;
+      logger.info('[R2 Upload] Upload successful');
+      return `${config.r2.publicUrl}/${fileName}`;
     } catch (uploadError) {
       clearInterval(progressInterval);
       throw uploadError;

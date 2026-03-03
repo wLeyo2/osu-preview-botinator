@@ -89,7 +89,9 @@ function parseManiaObjects(raw: string, keys: number): ManiaNote[] {
     const startTime = parseInt(parts[2] ?? '0', 10);
     const typeFlag = parseInt(parts[3] ?? '0', 10);
 
-    if (isNaN(x) || isNaN(startTime) || isNaN(typeFlag)) continue;
+    if (Number.isNaN(x) || Number.isNaN(startTime) || Number.isNaN(typeFlag)) {
+      continue;
+    }
 
     // Column from x-coordinate: column = floor(x * keys / 512)
     const column = Math.min(Math.floor((x * keys) / 512), keys - 1);
@@ -101,7 +103,7 @@ function parseManiaObjects(raw: string, keys: number): ManiaNote[] {
     if (isHold && parts.length >= 6) {
       const endPart = parts[5]?.split(':')[0] ?? '';
       const parsed = parseInt(endPart, 10);
-      if (!isNaN(parsed) && parsed > startTime) {
+      if (!Number.isNaN(parsed) && parsed > startTime) {
         endTime = parsed;
       }
     }
@@ -128,7 +130,11 @@ function computeDrainSeconds(raw: string, notes: ManiaNote[]): number {
     if (parts[0]?.trim() === '2' && parts.length >= 3) {
       const breakStart = parseInt(parts[1] ?? '0', 10);
       const breakEnd = parseInt(parts[2] ?? '0', 10);
-      if (!isNaN(breakStart) && !isNaN(breakEnd) && breakEnd > breakStart) {
+      if (
+        !Number.isNaN(breakStart) &&
+        !Number.isNaN(breakEnd) &&
+        breakEnd > breakStart
+      ) {
         breakMs += breakEnd - breakStart;
       }
     }
@@ -261,7 +267,13 @@ function parseTimingPoints(raw: string): SvPoint[] {
     const beatLength = parseFloat(parts[1] ?? '0');
     const uninherited = parseInt(parts[6] ?? '1', 10);
 
-    if (isNaN(time) || isNaN(beatLength) || isNaN(uninherited)) continue;
+    if (
+      Number.isNaN(time) ||
+      Number.isNaN(beatLength) ||
+      Number.isNaN(uninherited)
+    ) {
+      continue;
+    }
 
     // Only inherited (green) lines carry SV info. uninherited === 0 = green line.
     if (uninherited !== 0) continue;
@@ -290,7 +302,7 @@ function parseAllTimings(raw: string): ManiaNote[] {
     const parts = trimmed.split(',');
     if (parts.length < 3) continue;
     const startTime = parseInt(parts[2] ?? '0', 10);
-    if (!isNaN(startTime)) {
+    if (!Number.isNaN(startTime)) {
       timings.push({ column: 0, startTime, endTime: startTime, isHold: false });
     }
   }
