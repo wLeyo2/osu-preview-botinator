@@ -1,9 +1,10 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import ffmpeg from 'fluent-ffmpeg';
-import { promises as fs } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { PassThrough } from 'stream';
+import config from '@/utils/config';
 import logger from '@/utils/logger';
 import type { AudioResult } from './fetchAudio';
 import type { BeatmapMeta } from './parseBeatmap';
@@ -89,7 +90,7 @@ export async function encodeVideo(
   await fs.writeFile(audioPath, audio.buffer);
   // Drop the reference so the GC can reclaim the audio buffer (can be tens of MB)
   // before the potentially long encode begins.
-  (audio as { buffer: Buffer | null }).buffer = null!;
+  (audio as { buffer: Buffer | null }).buffer = null;
 
   try {
     await runFfmpeg(
@@ -105,10 +106,6 @@ export async function encodeVideo(
     );
   } finally {
     await fs.unlink(audioPath).catch(() => {});
-    // Nudge V8 to collect canvas wrappers, cover Image, and other native-backed
-    // objects that accumulated during the render. Non-blocking — runs concurrently
-    // with the rest of the pipeline (Discord upload etc).
-    Bun.gc(false);
   }
 
   logger.info(`Video encoded: ${outPath}`);
@@ -141,6 +138,7 @@ function runFfmpeg(
       .inputOptions([`-ss ${(audioSeekMs / 1000).toFixed(3)}`])
       .outputOptions([
         '-c:v libx264',
+        `-threads ${config.render.ffmpegThreads}`,
         '-preset ultrafast',
         '-crf 28',
         '-pix_fmt yuv420p',
@@ -191,12 +189,19 @@ export async function fetchCoverImage(
   beatmapSetId: string,
 ): Promise<Buffer | null> {
   const url = `https://assets.ppy.sh/beatmaps/${beatmapSetId}/covers/cover@2x.jpg`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, config.render.coverFetchTimeoutMs);
+
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) return null;
     return Buffer.from(await res.arrayBuffer());
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

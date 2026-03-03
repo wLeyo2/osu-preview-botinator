@@ -1,7 +1,6 @@
 import { SlashCommandBuilder } from 'discord.js';
 import {
   getUserPrefs,
-  NOTE_COLOR_SPECIAL_DEFAULT,
   NOTE_COLORS_DEFAULT,
   setNoteColor,
 } from '@/utils/osu/userPrefs';
@@ -93,7 +92,6 @@ export const command: Command = {
       setNoteColor(userId, colIndex, hex.toLowerCase());
     }
 
-    const prefs = getUserPrefs(userId);
     const updated = provided
       .map(
         ([hex, idx]) =>

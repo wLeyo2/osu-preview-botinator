@@ -1,5 +1,9 @@
 import { Client, GatewayIntentBits } from 'discord.js';
-
+import { preflightRedisConnection } from '@/queue/connection';
+import { stopQueueNotifier } from '@/queue/notifier';
+import { closeStoreConnection } from '@/queue/store';
+import { stopQueueTelemetry } from '@/queue/telemetry';
+import { closeQueueClients } from '@/queue/videoQueue';
 import config from '@/utils/config';
 import logger from '@/utils/logger';
 import { loadCommands } from './utils/loaders/commands';
@@ -14,16 +18,39 @@ const client = new Client({
 });
 
 (async () => {
-  await loadCommands(client, './src/commands');
-  await loadEvents(client, './src/events');
-
-  await client.login(config.token).catch((error) => logger.error(error));
+  try {
+    await preflightRedisConnection('redis-bot-preflight');
+    await loadCommands(client, './src/commands');
+    await loadEvents(client, './src/events');
+    await client.login(config.token);
+  } catch (error) {
+    logger.error(error);
+    await shutdown('BOOT_FAILURE', 1);
+  }
 })();
 
+let shuttingDown = false;
+async function shutdown(signal: string, exitCode = 0): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  logger.info(`Shutting down gracefully (${signal})...`);
+  stopQueueNotifier();
+  stopQueueTelemetry();
+  await Promise.allSettled([
+    closeQueueClients(),
+    closeStoreConnection(),
+    Promise.resolve(client.destroy()),
+  ]);
+  process.exit(exitCode);
+}
+
 process.on('SIGINT', () => {
-  logger.info('Shutting down gracefully...');
-  client.destroy();
-  process.exit(0);
+  void shutdown('SIGINT');
+});
+
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM');
 });
 
 process.on('unhandledRejection', (error) => {

@@ -1,0 +1,18 @@
+version: "0.5"
+
+processes:
+  discord-bot:
+    command: "bun run start:bot"
+    working_dir: "."
+    availability:
+      restart: "on_failure"
+      max_restarts: 5
+    log_location: "./logs/discord-bot.log"
+
+  render-worker:
+    command: "bun run start:worker"
+    working_dir: "."
+    availability:
+      restart: "on_failure"
+      max_restarts: 5
+    log_location: "./logs/render-worker.log"

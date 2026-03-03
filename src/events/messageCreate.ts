@@ -1,213 +1,231 @@
-import { AttachmentBuilder, EmbedBuilder, Events } from 'discord.js';
-import { uploadVideoToR2 } from '@/r2';
+import { Events } from 'discord.js';
+import { buildRenderKey } from '@/queue/renderKey';
+import {
+  acquireDeliveryWindow,
+  acquireQueueNoticeWindow,
+  addChannelSubscription,
+  getCachedRenderResult,
+  removeChannelSubscription,
+} from '@/queue/store';
+import type { RenderJobData } from '@/queue/types';
+import {
+  enqueueRenderJob,
+  estimateQueueWaitSeconds,
+  getQueueBacklog,
+  getRenderJobState,
+} from '@/queue/videoQueue';
 import config from '@/utils/config';
+import { Cooldown } from '@/utils/cooldown';
 import logger from '@/utils/logger';
-import { BEATMAP_URL_REGEX, SUPPORTED_MODES } from '@/utils/osu/constants';
-import {
-  cleanupVideo,
-  encodeVideo,
-  fetchCoverImage,
-} from '@/utils/osu/encoder';
-import {
-  extractAudioFilename,
-  fetchAudioFromOsz,
-} from '@/utils/osu/fetchAudio';
-import {
-  extractPreviewTime,
-  extractSetId,
-  fetchBeatmap,
-  parseOsuUrl,
-} from '@/utils/osu/fetchBeatmap';
-import { formatDuration, parseBeatmap } from '@/utils/osu/parseBeatmap';
+import { BEATMAP_URL_REGEX } from '@/utils/osu/constants';
+import { parseOsuUrl } from '@/utils/osu/fetchBeatmap';
 import { getScrollMs } from '@/utils/osu/scrollSpeed';
-import { renderStrainChart } from '@/utils/osu/strainChart';
 import { getUserPrefs } from '@/utils/osu/userPrefs';
 import type { Event } from '@/utils/types/event';
 
-const UNSUPPORTED_GAMEMODE =
-  'This beatmap mode is not supported. Only osu!standard and osu!mania are supported.';
+const requestCooldown = new Cooldown(config.queue.requestCooldownSec);
 
-/** Discord file size limit for bots without Nitro boost: 10 MB */
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+function isAllowedGuild(guildId: string): boolean {
+  const allowedGuilds = config.guildId
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+
+  if (allowedGuilds.length === 0) return false;
+  return allowedGuilds.includes(guildId);
+}
 
 export const event: Event<Events.MessageCreate> = {
   name: Events.MessageCreate,
+
   async execute(message) {
     if (message.author.bot) return;
     if (!message.guild) return;
-
-    // Guild allowlist: only process messages from configured guilds.
-    // Empty GUILD_ID = block all (fail-safe).
-    const allowedGuilds = config.guildId
-      .split(',')
-      .map((id) => id.trim())
-      .filter(Boolean);
-    if (allowedGuilds.length === 0 || !allowedGuilds.includes(message.guild.id))
-      return;
+    if (!isAllowedGuild(message.guild.id)) return;
 
     const match = message.content.match(BEATMAP_URL_REGEX);
     if (!match) return;
 
-    const url = match[0];
-    logger.info(`osu! link detected from ${message.author.tag}: ${url}`);
-
-    let beatmapSetId: string;
-    let beatmapId: string;
-
-    try {
-      ({ beatmapSetId, beatmapId } = parseOsuUrl(url));
-    } catch (err) {
-      await message.reply({
-        content: err instanceof Error ? err.message : 'Invalid osu! URL.',
-      });
+    if (
+      config.queue.requestCooldownSec > 0 &&
+      requestCooldown.check(message.author.id)
+    ) {
+      const remaining = requestCooldown.getRemainingTime(message.author.id);
+      await message
+        .reply({
+          content: `Please wait ${remaining}s before requesting again.`,
+        })
+        .catch(() => {});
       return;
     }
 
-    await message.channel.sendTyping();
+    if (config.queue.requestCooldownSec > 0) {
+      requestCooldown.set(message.author.id);
+    }
+
+    const sourceUrl = match[0];
+
+    let beatmapSetId = '';
+    let beatmapId = '';
+    try {
+      ({ beatmapSetId, beatmapId } = parseOsuUrl(sourceUrl));
+    } catch (err) {
+      await message
+        .reply({
+          content: err instanceof Error ? err.message : 'Invalid osu! URL.',
+        })
+        .catch(() => {});
+      return;
+    }
+
+    const userPrefs = getUserPrefs(message.author.id);
+    const scrollMs = getScrollMs(message.author.id);
+    const renderOpts = {
+      noteStyle: userPrefs.noteStyle,
+      noteColors: userPrefs.noteColors,
+      noteColorSpecial: userPrefs.noteColorSpecial,
+      scrollDirection: userPrefs.scrollDirection,
+    };
+
+    const renderKey = buildRenderKey({
+      beatmapId,
+      scrollMs,
+      renderMode: userPrefs.renderMode,
+      renderOpts,
+    });
+
+    let subscribed = false;
 
     try {
-      // 1. Fetch the .osu file
-      const rawBeatmap = await fetchBeatmap(beatmapId);
-
-      if (!beatmapSetId) {
-        beatmapSetId = extractSetId(rawBeatmap);
-        if (!beatmapSetId) {
-          await message.reply({
-            content:
-              'Could not determine the beatmapset ID. Please use a beatmapsets link.',
-          });
-          return;
-        }
-      }
-
-      // 2. Parse — extract everything needed from rawBeatmap then let it go.
-      // The string can be 100–500 KB and isn't needed past this point.
-      const meta = parseBeatmap(rawBeatmap);
-      const previewTime = extractPreviewTime(rawBeatmap);
-      const audioFilename = extractAudioFilename(rawBeatmap);
-      // rawBeatmap is now eligible for GC (no further references below)
-
-      if (!SUPPORTED_MODES.includes(meta.mode)) {
-        await message.reply({ content: UNSUPPORTED_GAMEMODE });
-        return;
-      }
-
-      const userPrefs = getUserPrefs(message.author.id);
-      const scrollMs = getScrollMs(message.author.id);
-
-      // 3. Fetch audio + cover in parallel
-      const [audio, coverImage] = await Promise.all([
-        fetchAudioFromOsz(beatmapSetId, audioFilename),
-        fetchCoverImage(beatmapSetId),
-      ]);
-
-      // 4. Encode video
-      const videoPath = await encodeVideo(
-        meta,
-        audio,
-        coverImage,
-        previewTime,
-        scrollMs,
-        {
-          noteStyle: userPrefs.noteStyle,
-          noteColors: userPrefs.noteColors,
-          noteColorSpecial: userPrefs.noteColorSpecial,
-          scrollDirection: userPrefs.scrollDirection,
-        },
-        userPrefs.renderMode,
-      );
-
-      // 5. Render strain chart
-      const chartBuffer = renderStrainChart(meta);
-
-      // 6. Build embed
-      const modeName = meta.mode === 3 ? 'osu!mania' : 'osu!standard';
-      const keyInfo = meta.mode === 3 ? ` • ${meta.keys}K` : '';
-
-      const embed = new EmbedBuilder()
-        .setColor(0xe47fff)
-        .setTitle(`${meta.artist} - ${meta.title}`)
-        .setDescription(`**[${meta.version}]** — mapped by ${meta.creator}`)
-        .addFields(
-          { name: 'Mode', value: `${modeName}${keyInfo}`, inline: true },
-          {
-            name: 'Star Rating',
-            value: `${meta.stars.toFixed(2)} ★`,
-            inline: true,
-          },
-          {
-            name: 'Duration',
-            value: formatDuration(meta.drainSeconds),
-            inline: true,
-          },
-          { name: 'HP Drain', value: `${meta.hp.toFixed(1)}`, inline: true },
-          {
-            name: 'Overall Difficulty',
-            value: `${meta.od.toFixed(1)}`,
-            inline: true,
-          },
-          { name: 'BPM', value: `${Math.round(meta.bpm)}`, inline: true },
-        )
-        // Attach strain chart image — Discord renders attachments referenced by
-        // attachment:// URL inside embeds
-        .setImage('attachment://strain.png')
-        .setFooter({
-          text: `osu!preview-botinator • scroll: ${scrollMs} ms • render: ${userPrefs.renderMode} • ${userPrefs.scrollDirection === 'up' ? '↑ upscroll' : '↓ downscroll'}`,
-        });
-
-      if (coverImage) {
-        embed.setThumbnail(
-          `https://assets.ppy.sh/beatmaps/${beatmapSetId}/covers/cover@2x.jpg`,
+      const cachedResult = await getCachedRenderResult(renderKey);
+      if (cachedResult) {
+        const canDeliver = await acquireDeliveryWindow(
+          renderKey,
+          message.guild.id,
+          message.channel.id,
         );
-      }
 
-      const { stat } = await import('node:fs/promises');
-      const { size } = await stat(videoPath);
-
-      const chartAttachment = new AttachmentBuilder(chartBuffer, {
-        name: 'strain.png',
-      });
-
-      if (size > MAX_FILE_BYTES) {
-        const fileName = `preview_${beatmapId}.mp4`;
-        const videoUrl = await uploadVideoToR2(videoPath, fileName);
-
-        if (videoUrl) {
-          embed.setURL(videoUrl);
-          await message.reply({
-            content: `Video too large for direct upload (${(size / 1024 / 1024).toFixed(1)} MB).`,
-            embeds: [embed],
-            files: [chartAttachment],
-          });
-          await message.channel.send(videoUrl).catch(() => {});
+        if (canDeliver) {
+          await message
+            .reply({ content: cachedResult.videoUrl })
+            .catch(() => {});
+          logger.info(
+            `[Render cache hit] beatmap=${beatmapId} key=${renderKey} guild=${message.guild.id} channel=${message.channel.id}`,
+          );
         } else {
-          await message.reply({
-            content: `Failed to upload video to R2 (${(size / 1024 / 1024).toFixed(1)} MB > ${MAX_FILE_BYTES / 1024 / 1024} MB).`,
-            embeds: [embed],
-            files: [chartAttachment],
-          });
+          const shouldNotice = await acquireQueueNoticeWindow(
+            renderKey,
+            message.guild.id,
+            message.channel.id,
+          );
+          if (shouldNotice) {
+            await message
+              .reply({
+                content:
+                  'That preview was already posted in this channel recently. Ask again in a few minutes to repost the cached URL.',
+              })
+              .catch(() => {});
+          }
         }
 
-        await cleanupVideo(videoPath);
         return;
       }
 
-      const videoAttachment = new AttachmentBuilder(videoPath, {
-        name: 'preview.mp4',
-      });
+      const [jobState, backlogBefore] = await Promise.all([
+        getRenderJobState(renderKey),
+        getQueueBacklog(),
+      ]);
+      const hasInFlightJob =
+        jobState === 'waiting' ||
+        jobState === 'active' ||
+        jobState === 'delayed';
+      const queueSaturated =
+        backlogBefore.totalPending >= config.queue.maxBacklog;
 
-      await message.reply({
-        embeds: [embed],
-        files: [videoAttachment, chartAttachment],
-      });
+      if (queueSaturated && !hasInFlightJob) {
+        const shouldNotice = await acquireQueueNoticeWindow(
+          renderKey,
+          message.guild.id,
+          message.channel.id,
+        );
 
-      await cleanupVideo(videoPath);
+        if (shouldNotice) {
+          const etaSec = estimateQueueWaitSeconds(backlogBefore);
+          const etaMinutes = Math.max(1, Math.ceil(etaSec / 60));
+          await message
+            .reply({
+              content:
+                `Render queue is currently full (${backlogBefore.totalPending}/${config.queue.maxBacklog}). ` +
+                `Please retry in a few minutes (estimated wait ~${etaMinutes} min).`,
+            })
+            .catch(() => {});
+        }
+
+        logger.warn(
+          `[Render rejected] beatmap=${beatmapId} key=${renderKey} backlog=${backlogBefore.totalPending} limit=${config.queue.maxBacklog}`,
+        );
+        return;
+      }
+
+      await addChannelSubscription(
+        renderKey,
+        message.guild.id,
+        message.channel.id,
+      );
+      subscribed = true;
+
+      const jobData: RenderJobData = {
+        renderKey,
+        sourceUrl,
+        beatmapId,
+        beatmapSetId: beatmapSetId || undefined,
+        requesterId: message.author.id,
+        scrollMs,
+        renderMode: userPrefs.renderMode,
+        renderOpts,
+      };
+
+      const { created } = hasInFlightJob
+        ? { created: false }
+        : await enqueueRenderJob(renderKey, jobData);
+
+      const backlogAfter = await getQueueBacklog();
+      const etaSec = estimateQueueWaitSeconds(backlogAfter);
+      const etaMinutes = Math.max(1, Math.ceil(etaSec / 60));
+      const queueDepth = `${backlogAfter.totalPending}/${config.queue.maxBacklog}`;
+
+      const shouldNotice = await acquireQueueNoticeWindow(
+        renderKey,
+        message.guild.id,
+        message.channel.id,
+      );
+      if (shouldNotice) {
+        await message
+          .reply({
+            content: created
+              ? `Render queued (queue ${queueDepth}, ETA ~${etaMinutes} min). I will post the video URL in this channel when it is ready.`
+              : `This preview is already rendering (queue ${queueDepth}, ETA ~${etaMinutes} min). I will post the video URL here when it is ready.`,
+          })
+          .catch(() => {});
+      }
+
+      logger.info(
+        `[Render enqueued] beatmap=${beatmapId} key=${renderKey} created=${created} guild=${message.guild.id} channel=${message.channel.id}`,
+      );
     } catch (err) {
       logger.error(err);
-      const msg =
-        err instanceof Error ? err.message : 'An unexpected error occurred.';
+      if (subscribed) {
+        await removeChannelSubscription(
+          renderKey,
+          message.guild.id,
+          message.channel.id,
+        ).catch(() => {});
+      }
       await message
-        .reply({ content: `Failed to generate preview: ${msg}` })
+        .reply({
+          content:
+            'Failed to queue preview render. Please try again in a moment.',
+        })
         .catch(() => {});
     }
   },
