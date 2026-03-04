@@ -1,6 +1,6 @@
 /**
  * Per-user preferences for note rendering.
- * Stored in memory; resets on bot restart.
+ * Stored in memory with write-through to Redis; persists across restarts.
  */
 
 export type NoteStyle = 'bar' | 'circle' | 'arrow';
@@ -41,6 +41,26 @@ export interface UserPrefs {
 }
 
 const userPrefs = new Map<string, UserPrefs>();
+const redisCacheMisses = new Set<string>();
+
+async function loadUserPrefsFromRedis(
+  userId: string,
+): Promise<UserPrefs | null> {
+  if (redisCacheMisses.has(userId)) {
+    return null;
+  }
+
+  try {
+    const { getUserPrefsFromRedis } = await import('@/queue/store');
+    const prefs = await getUserPrefsFromRedis(userId);
+    if (prefs === null) {
+      redisCacheMisses.add(userId);
+    }
+    return prefs;
+  } catch (_error) {
+    return null;
+  }
+}
 
 function defaultPrefs(): UserPrefs {
   return {
@@ -52,8 +72,19 @@ function defaultPrefs(): UserPrefs {
   };
 }
 
-export function getUserPrefs(userId: string): UserPrefs {
-  return userPrefs.get(userId) ?? defaultPrefs();
+export async function getUserPrefs(userId: string): Promise<UserPrefs> {
+  const cached = userPrefs.get(userId);
+  if (cached) return cached;
+
+  const fromRedis = await loadUserPrefsFromRedis(userId);
+  if (fromRedis) {
+    userPrefs.set(userId, fromRedis);
+    return fromRedis;
+  }
+
+  const defaults = defaultPrefs();
+  userPrefs.set(userId, defaults);
+  return defaults;
 }
 
 function ensureUser(userId: string): UserPrefs {
@@ -65,39 +96,73 @@ function ensureUser(userId: string): UserPrefs {
   return prefs;
 }
 
-export function setNoteStyle(userId: string, style: NoteStyle): void {
-  ensureUser(userId).noteStyle = style;
+export async function setNoteStyle(
+  userId: string,
+  style: NoteStyle,
+): Promise<void> {
+  const prefs = ensureUser(userId);
+  prefs.noteStyle = style;
+
+  try {
+    const { setUserPrefsToRedis } = await import('@/queue/store');
+    await setUserPrefsToRedis(userId, prefs);
+  } catch (_error) {}
 }
 
 /**
  * Set a note color for a specific column index (0-based).
  * Pass `'special'` as colIndex to set the center-column color.
  */
-export function setNoteColor(
+export async function setNoteColor(
   userId: string,
   colIndex: number | 'special',
   hex: string,
-): void {
+): Promise<void> {
   const prefs = ensureUser(userId);
   if (colIndex === 'special') {
     prefs.noteColorSpecial = hex;
   } else {
     prefs.noteColors[colIndex] = hex;
   }
+
+  try {
+    const { setUserPrefsToRedis } = await import('@/queue/store');
+    await setUserPrefsToRedis(userId, prefs);
+  } catch (_error) {}
 }
 
-export function setRenderMode(userId: string, mode: RenderMode): void {
-  ensureUser(userId).renderMode = mode;
+export async function setRenderMode(
+  userId: string,
+  mode: RenderMode,
+): Promise<void> {
+  const prefs = ensureUser(userId);
+  prefs.renderMode = mode;
+
+  try {
+    const { setUserPrefsToRedis } = await import('@/queue/store');
+    await setUserPrefsToRedis(userId, prefs);
+  } catch (_error) {}
 }
 
-export function setScrollDirection(
+export async function setScrollDirection(
   userId: string,
   direction: ScrollDirection,
-): void {
-  ensureUser(userId).scrollDirection = direction;
+): Promise<void> {
+  const prefs = ensureUser(userId);
+  prefs.scrollDirection = direction;
+
+  try {
+    const { setUserPrefsToRedis } = await import('@/queue/store');
+    await setUserPrefsToRedis(userId, prefs);
+  } catch (_error) {}
 }
 
 /** Reset a user's preferences to defaults */
-export function resetUserPrefs(userId: string): void {
+export async function resetUserPrefs(userId: string): Promise<void> {
   userPrefs.delete(userId);
+
+  try {
+    const { deleteUserPrefsFromRedis } = await import('@/queue/store');
+    await deleteUserPrefsFromRedis(userId);
+  } catch (_error) {}
 }

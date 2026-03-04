@@ -38,7 +38,8 @@ export const command: Command = {
 
     // No option — show current setting
     if (!modeInput) {
-      const current = getUserPrefs(userId).renderMode ?? RENDER_MODE_DEFAULT;
+      const current =
+        (await getUserPrefs(userId)).renderMode ?? RENDER_MODE_DEFAULT;
       await interaction.editReply(
         `Your render mode: **${current}** — ${MODE_DESCRIPTIONS[current]}\n` +
           `Use \`/rendermode mode:\` to change.`,
@@ -46,7 +47,7 @@ export const command: Command = {
       return;
     }
 
-    setRenderMode(userId, modeInput);
+    await setRenderMode(userId, modeInput);
 
     await interaction.editReply(
       `Render mode set to **${modeInput}** — ${MODE_DESCRIPTIONS[modeInput]}`,

@@ -78,8 +78,8 @@ export const event: Event<Events.MessageCreate> = {
       return;
     }
 
-    const userPrefs = getUserPrefs(message.author.id);
-    const scrollMs = getScrollMs(message.author.id);
+    const userPrefs = await getUserPrefs(message.author.id);
+    const scrollMs = await getScrollMs(message.author.id);
     const renderOpts = {
       noteStyle: userPrefs.noteStyle,
       noteColors: userPrefs.noteColors,

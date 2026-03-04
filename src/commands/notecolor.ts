@@ -64,7 +64,7 @@ export const command: Command = {
 
     // No options given — show current colors
     if (provided.length === 0) {
-      const prefs = getUserPrefs(userId);
+      const prefs = await getUserPrefs(userId);
       const cols = prefs.noteColors;
       const lines = [
         `**Your current note colors:**`,
@@ -89,7 +89,7 @@ export const command: Command = {
     }
 
     for (const [hex, colIndex] of provided) {
-      setNoteColor(userId, colIndex, hex.toLowerCase());
+      await setNoteColor(userId, colIndex, hex.toLowerCase());
     }
 
     const updated = provided

@@ -1,9 +1,6 @@
 #!/usr/bin/env bun
 import { exec } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -17,7 +14,7 @@ interface DiagnosticResult {
 
 const results: DiagnosticResult[] = [];
 
-function log(...args: unknown[]) {
+function _log(...args: unknown[]) {
   console.log(...args);
 }
 
@@ -275,7 +272,7 @@ async function checkNodeVersion() {
 }
 
 function printSummary() {
-  console.log('\n' + '='.repeat(60));
+  console.log(`\n${'='.repeat(60)}`);
   console.log('DIAGNOSTIC SUMMARY');
   console.log('='.repeat(60));
 

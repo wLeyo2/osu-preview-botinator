@@ -1,9 +1,9 @@
 import type IORedis from 'ioredis';
 import config from '@/utils/config';
 import logger from '@/utils/logger';
+import type { UserPrefs } from '@/utils/osu/userPrefs';
 import { createRedisConnection } from './connection';
 import type { ChannelSubscription, RenderResult } from './types';
-import type { UserPrefs } from '@/utils/osu/userPrefs';
 
 let redis: IORedis | null = null;
 
@@ -158,6 +158,61 @@ export async function acquireQueueNoticeWindow(
     'NX',
   );
   return result === 'OK';
+}
+
+export async function getUserPrefsFromRedis(
+  userId: string,
+): Promise<UserPrefs | null> {
+  const raw = await getRedis().get(userPrefsKey(userId));
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw) as UserPrefs;
+  } catch (err) {
+    logger.warn(
+      `Invalid user prefs payload for ${userId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    await getRedis().del(userPrefsKey(userId));
+    return null;
+  }
+}
+
+export async function setUserPrefsToRedis(
+  userId: string,
+  prefs: UserPrefs,
+): Promise<void> {
+  await getRedis().set(userPrefsKey(userId), JSON.stringify(prefs));
+}
+
+export async function deleteUserPrefsFromRedis(userId: string): Promise<void> {
+  await getRedis().del(userPrefsKey(userId));
+}
+
+export async function getScrollSpeedFromRedis(
+  userId: string,
+): Promise<number | null> {
+  const raw = await getRedis().get(scrollSpeedKey(userId));
+  if (!raw) return null;
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+export async function setScrollSpeedToRedis(
+  userId: string,
+  ms: number,
+): Promise<void> {
+  await getRedis().set(scrollSpeedKey(userId), String(ms));
+}
+
+export async function deleteScrollSpeedFromRedis(
+  userId: string,
+): Promise<void> {
+  await getRedis().del(scrollSpeedKey(userId));
+}
+
+function scrollSpeedKey(userId: string): string {
+  return key('user', 'scroll', userId);
 }
 
 export async function closeStoreConnection(): Promise<void> {

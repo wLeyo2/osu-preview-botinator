@@ -43,7 +43,8 @@ export const command: Command = {
     // No option — show current setting
     if (!dirInput) {
       const current =
-        getUserPrefs(userId).scrollDirection ?? SCROLL_DIRECTION_DEFAULT;
+        (await getUserPrefs(userId)).scrollDirection ??
+        SCROLL_DIRECTION_DEFAULT;
       await interaction.editReply(
         `Your scroll direction: **${DIRECTION_LABELS[current]}** — ${DIRECTION_DESCRIPTIONS[current]}\n` +
           `Use \`/scrolldirection direction:\` to change.`,
@@ -51,7 +52,7 @@ export const command: Command = {
       return;
     }
 
-    setScrollDirection(userId, dirInput);
+    await setScrollDirection(userId, dirInput);
 
     await interaction.editReply(
       `Scroll direction set to **${DIRECTION_LABELS[dirInput]}** — ${DIRECTION_DESCRIPTIONS[dirInput]}`,

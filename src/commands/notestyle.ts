@@ -43,7 +43,7 @@ export const command: Command = {
     const doReset = interaction.options.getBoolean('reset') ?? false;
 
     if (doReset) {
-      resetUserPrefs(userId);
+      await resetUserPrefs(userId);
       await interaction.editReply(
         'Your note preferences have been reset to default.',
       );
@@ -51,7 +51,7 @@ export const command: Command = {
     }
 
     if (!style) {
-      const prefs = getUserPrefs(userId);
+      const prefs = await getUserPrefs(userId);
       const desc = STYLE_DESCRIPTIONS[prefs.noteStyle];
       await interaction.editReply(
         `Your current note style: **${prefs.noteStyle}** — ${desc}\nUse \`/notestyle style:\` to change it.`,
@@ -59,7 +59,7 @@ export const command: Command = {
       return;
     }
 
-    setNoteStyle(userId, style);
+    await setNoteStyle(userId, style);
     await interaction.editReply(
       `Note style set to **${style}** — ${STYLE_DESCRIPTIONS[style]}. Your next preview will use this style.`,
     );
