@@ -3,6 +3,7 @@ import config from '@/utils/config';
 import logger from '@/utils/logger';
 import { createRedisConnection } from './connection';
 import type { ChannelSubscription, RenderResult } from './types';
+import type { UserPrefs } from '@/utils/osu/userPrefs';
 
 let redis: IORedis | null = null;
 
@@ -40,6 +41,10 @@ function queueNoticeKey(
   channelId: string,
 ): string {
   return key('render', 'queue-notice', guildId, channelId, renderKey);
+}
+
+function userPrefsKey(userId: string): string {
+  return key('user', 'prefs', userId);
 }
 
 function encodeSub(guildId: string, channelId: string): string {
