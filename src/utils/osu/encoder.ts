@@ -11,7 +11,6 @@ import type { BeatmapMeta } from './parseBeatmap';
 import type { RenderOptions } from './renderer';
 import {
   DEFAULT_SCROLL_MS,
-  FPS,
   renderFrames,
   VIDEO_HEIGHT,
   VIDEO_WIDTH,
@@ -125,6 +124,7 @@ function runFfmpeg(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const videoStream = new PassThrough();
+    const fps = config.render.fps;
 
     const command = ffmpeg()
       .input(videoStream as unknown as string)
@@ -132,7 +132,7 @@ function runFfmpeg(
         '-f rawvideo',
         '-pixel_format rgba',
         `-video_size ${VIDEO_WIDTH}x${VIDEO_HEIGHT}`,
-        `-framerate ${FPS}`,
+        `-framerate ${fps}`,
       ])
       .input(audioPath)
       .inputOptions([`-ss ${(audioSeekMs / 1000).toFixed(3)}`])
@@ -143,7 +143,7 @@ function runFfmpeg(
         '-crf 28',
         '-pix_fmt yuv420p',
         '-c:a aac',
-        '-b:a 128k',
+        `-b:a ${config.render.audioBitrateKbps}k`,
         `-t ${(durationMs / 1000).toFixed(3)}`,
         '-movflags +faststart',
       ])
@@ -169,6 +169,7 @@ function runFfmpeg(
           await new Promise<void>((res) => videoStream.once('drain', res));
         }
       },
+      fps,
       renderOpts,
     )
       .then(() => videoStream.end())

@@ -94,8 +94,11 @@ export async function addChannelSubscription(
   const token = encodeSub(guildId, channelId);
   const subKey = subscriptionsKey(renderKey);
   const client = getRedis();
-  await client.sadd(subKey, token);
-  await client.expire(subKey, Math.max(config.render.cacheTtlSec, 3_600));
+  await client
+    .multi()
+    .sadd(subKey, token)
+    .expire(subKey, Math.max(config.render.cacheTtlSec, 3_600))
+    .exec();
 }
 
 export async function removeChannelSubscription(

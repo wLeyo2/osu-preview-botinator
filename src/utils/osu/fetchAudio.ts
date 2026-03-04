@@ -11,7 +11,7 @@ const MIRRORS: Array<{ name: string; url: (id: string) => string }> = [
 ];
 
 /** Audio file extensions recognised inside .osz archives */
-const AUDIO_EXTENSIONS = ['.mp3', '.ogg', '.wav', '.flac'];
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.ogg', '.wav', '.flac']);
 
 const mirrorCooldownUntil = new Map<string, number>();
 
@@ -246,6 +246,8 @@ async function extractAudioFromStream(
     let pendingEntries = 0;
     let fallbackCandidate: AudioResult | null = null;
     let lastProgressAt = Date.now();
+    const normalizedPreferred = preferredFilename?.toLowerCase() ?? '';
+    const hasPreferred = normalizedPreferred.length > 0;
 
     const stallCheckIntervalMs = Math.max(
       500,
@@ -308,18 +310,20 @@ async function extractAudioFromStream(
     parser.on('entry', (entry: import('unzipper').Entry) => {
       const filename = entry.path;
       const ext = getExtension(filename).toLowerCase();
-      const isAudio = AUDIO_EXTENSIONS.includes(ext);
+      const isAudio = AUDIO_EXTENSIONS.has(ext);
       if (!isAudio) {
         entry.autodrain();
         return;
       }
 
+      const filenameLower = filename.toLowerCase();
       const wantsPreferred =
-        Boolean(preferredFilename) &&
-        filename.toLowerCase() === preferredFilename?.toLowerCase();
-      const captureForFallback = !wantsPreferred && !fallbackCandidate;
+        hasPreferred && filenameLower === normalizedPreferred;
+      const takeImmediate = !hasPreferred;
+      const captureForFallback =
+        hasPreferred && !wantsPreferred && !fallbackCandidate;
 
-      if (!wantsPreferred && !captureForFallback) {
+      if (!wantsPreferred && !takeImmediate && !captureForFallback) {
         entry.autodrain();
         return;
       }
@@ -343,7 +347,7 @@ async function extractAudioFromStream(
           filename,
         };
 
-        if (wantsPreferred) {
+        if (wantsPreferred || takeImmediate) {
           resolveOnce(result);
           return;
         }

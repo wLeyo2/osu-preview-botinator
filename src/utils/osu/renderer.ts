@@ -8,14 +8,13 @@ import {
   NOTE_COLOR_SPECIAL_DEFAULT,
   NOTE_COLORS_DEFAULT,
   NOTE_STYLE_DEFAULT,
+  STRAIN_OVERLAY_DEFAULT,
 } from './userPrefs';
 
 // ─── Layout constants ──────────────────────────────────────────────────────────
 
 export const VIDEO_WIDTH = 360;
 export const VIDEO_HEIGHT = 640; // 9:16 portrait
-
-export const FPS = 60;
 
 /** Default: how many ms of notes are visible in the playfield at once */
 export const DEFAULT_SCROLL_MS = 500;
@@ -28,6 +27,9 @@ const HITLINE_Y_UP = HEADER_HEIGHT + 10;
 
 const COL_GAP = 2;
 const NOTE_HEIGHT = 22;
+const FOOTER_HEIGHT = 44;
+const FOOTER_CHART_PAD_X = 12;
+const FOOTER_CHART_PAD_Y = 8;
 
 /** Height of the playfield area (same for both scroll directions) */
 const PLAYFIELD_HEIGHT = HITLINE_Y_DOWN - HEADER_HEIGHT;
@@ -105,66 +107,42 @@ function buildSvTable(
   return table;
 }
 
-/**
- * Returns the SV-weighted visual distance (in ms-equivalent units) between
- * `fromMs` and `toMs`, using the pre-built SV table.
- *
- * Positive result = toMs is after fromMs.
- * Can handle toMs < fromMs (returns negative value) for tail notes below head.
- */
-function svVisualOffset(
-  table: SvTableEntry[],
-  fromMs: number,
-  toMs: number,
-): number {
-  if (table.length === 0) return toMs - fromMs;
+function findSvTableIndex(table: SvTableEntry[], timeMs: number): number {
+  let lo = 0;
+  let hi = table.length - 1;
 
-  const sign = toMs >= fromMs ? 1 : -1;
-  const lo = sign > 0 ? fromMs : toMs;
-  const hi = sign > 0 ? toMs : fromMs;
-
-  // Find the table segment containing lo
-  let loIdx = 0;
-  for (let i = table.length - 1; i >= 0; i--) {
-    if ((table[i]?.time ?? 0) <= lo) {
-      loIdx = i;
-      break;
-    }
-  }
-  // Find the table segment containing hi
-  let hiIdx = table.length - 1;
-  for (let i = table.length - 1; i >= 0; i--) {
-    if ((table[i]?.time ?? 0) <= hi) {
-      hiIdx = i;
-      break;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const midTime = table[mid]?.time ?? 0;
+    if (midTime <= timeMs) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
     }
   }
 
-  if (loIdx === hiIdx) {
-    // Both within the same segment — simple multiplication
-    return sign * (hi - lo) * (table[loIdx]?.svMultiplier ?? 1.0);
+  return Math.max(0, Math.min(table.length - 1, hi));
+}
+
+function svCumulativeAt(table: SvTableEntry[], timeMs: number): number {
+  if (table.length === 0) return timeMs;
+
+  const first = table[0];
+  const last = table[table.length - 1];
+  if (!first || !last) return timeMs;
+
+  if (timeMs <= first.time) {
+    return first.cumulative + (timeMs - first.time) * first.svMultiplier;
   }
 
-  // Sum across segments
-  const loEntry = table[loIdx];
-  const loNextEntry = table[loIdx + 1];
-  if (!loEntry || !loNextEntry) {
-    return sign * (hi - lo);
-  }
-  let total = (loNextEntry.time - lo) * loEntry.svMultiplier;
-
-  for (let i = loIdx + 1; i < hiIdx; i++) {
-    const entry = table[i];
-    const nextEntry = table[i + 1];
-    if (!entry || !nextEntry) continue;
-    total += (nextEntry.time - entry.time) * entry.svMultiplier;
+  if (timeMs >= last.time) {
+    return last.cumulative + (timeMs - last.time) * last.svMultiplier;
   }
 
-  const hiEntry = table[hiIdx];
-  if (!hiEntry) return sign * total;
-  total += (hi - hiEntry.time) * hiEntry.svMultiplier;
-
-  return sign * total;
+  const idx = findSvTableIndex(table, timeMs);
+  const entry = table[idx];
+  if (!entry) return timeMs;
+  return entry.cumulative + (timeMs - entry.time) * entry.svMultiplier;
 }
 
 // ─── Colour scheme ─────────────────────────────────────────────────────────────
@@ -242,33 +220,173 @@ function roundRect(
   ctx.closePath();
 }
 
+interface StrainFooterOverlay {
+  canvas: Canvas;
+  plotX: number;
+  plotY: number;
+  plotH: number;
+  profileY: Float32Array;
+}
+
+function clamp01(value: number): number {
+  if (value <= 0) return 0;
+  if (value >= 1) return 1;
+  return value;
+}
+
+function buildStrainFooterOverlay(
+  meta: BeatmapMeta,
+  startMs: number,
+  durationMs: number,
+): StrainFooterOverlay | null {
+  if (meta.strainValues.length === 0 || durationMs <= 0) return null;
+
+  const plotX = FOOTER_CHART_PAD_X;
+  const plotY = FOOTER_CHART_PAD_Y + 8;
+  const plotW = VIDEO_WIDTH - FOOTER_CHART_PAD_X * 2;
+  const plotH = FOOTER_HEIGHT - plotY - FOOTER_CHART_PAD_Y;
+  if (plotW < 2 || plotH < 4) return null;
+
+  const sectionMs = Math.max(1, meta.strainSectionMs);
+  const strainOriginMs = meta.strainStartMs;
+  const sampled = new Float32Array(plotW);
+  let maxValue = 0;
+
+  for (let x = 0; x < plotW; x++) {
+    const frac = x / (plotW - 1);
+    const timeMs = startMs + frac * durationMs;
+    const index = Math.max(
+      0,
+      Math.min(
+        meta.strainValues.length - 1,
+        Math.floor((timeMs - strainOriginMs) / sectionMs),
+      ),
+    );
+    const value = meta.strainValues[index] ?? 0;
+    sampled[x] = value;
+    if (value > maxValue) {
+      maxValue = value;
+    }
+  }
+
+  const normalizedMax = maxValue > 0 ? maxValue : 1;
+  const profileY = new Float32Array(plotW);
+  const baseY = plotY + plotH;
+
+  const footerCanvas = createCanvas(VIDEO_WIDTH, FOOTER_HEIGHT);
+  const footerCtx = footerCanvas.getContext('2d');
+
+  footerCtx.fillStyle = 'rgba(0,0,0,0.42)';
+  footerCtx.fillRect(0, 0, VIDEO_WIDTH, FOOTER_HEIGHT);
+
+  footerCtx.fillStyle = 'rgba(255,255,255,0.4)';
+  footerCtx.font = '10px sans-serif';
+  footerCtx.fillText('strain', plotX, FOOTER_CHART_PAD_Y + 7);
+
+  footerCtx.fillStyle = 'rgba(255,255,255,0.08)';
+  footerCtx.fillRect(plotX, baseY, plotW, 1);
+
+  footerCtx.beginPath();
+  footerCtx.moveTo(plotX, baseY);
+  for (let x = 0; x < plotW; x++) {
+    const intensity = (sampled[x] ?? 0) / normalizedMax;
+    const y = baseY - intensity * plotH;
+    profileY[x] = y;
+    footerCtx.lineTo(plotX + x, y);
+  }
+  footerCtx.lineTo(plotX + plotW - 1, baseY);
+  footerCtx.closePath();
+  footerCtx.fillStyle = 'rgba(84,180,250,0.22)';
+  footerCtx.fill();
+
+  footerCtx.beginPath();
+  for (let x = 0; x < plotW; x++) {
+    const y = profileY[x] ?? baseY;
+    if (x === 0) {
+      footerCtx.moveTo(plotX, y);
+    } else {
+      footerCtx.lineTo(plotX + x, y);
+    }
+  }
+  footerCtx.strokeStyle = 'rgba(166,226,255,0.78)';
+  footerCtx.lineWidth = 1.25;
+  footerCtx.stroke();
+
+  return {
+    canvas: footerCanvas,
+    plotX,
+    plotY,
+    plotH,
+    profileY,
+  };
+}
+
+function drawStrainFooterFrame(
+  ctx: SKRSContext2D,
+  overlay: StrainFooterOverlay,
+  currentMs: number,
+  startMs: number,
+  durationMs: number,
+): void {
+  const footerY = VIDEO_HEIGHT - FOOTER_HEIGHT;
+  ctx.drawImage(overlay.canvas, 0, footerY);
+
+  const progress = clamp01((currentMs - startMs) / Math.max(1, durationMs));
+  const maxIndex = overlay.profileY.length - 1;
+  const sampleIndex = Math.max(
+    0,
+    Math.min(maxIndex, Math.round(progress * maxIndex)),
+  );
+  const playheadX = overlay.plotX + sampleIndex;
+  const playheadY =
+    overlay.profileY[sampleIndex] ?? overlay.plotY + overlay.plotH;
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.74)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(playheadX + 0.5, footerY + overlay.plotY - 1);
+  ctx.lineTo(playheadX + 0.5, footerY + overlay.plotY + overlay.plotH + 1);
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.94)';
+  ctx.beginPath();
+  ctx.arc(playheadX, footerY + playheadY, 2, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 // ─── Asset-based note drawing ─────────────────────────────────────────────────
 
-/**
- * Per-render cache of offscreen canvases keyed by "WxH".
- * Reusing canvases eliminates thousands of native Skia allocations per encode,
- * preventing the native-heap growth that isn't visible to the JS GC.
- */
-type OffscreenCache = Map<string, { canvas: Canvas; ctx: SKRSContext2D }>;
+type TintedAssetCache = Map<string, Canvas>;
 
-function getCachedCanvas(
-  cache: OffscreenCache,
+function getTintedCanvas(
+  cache: TintedAssetCache,
+  asset: Image,
+  assetKey: string,
+  color: string,
   w: number,
   h: number,
-): { canvas: Canvas; ctx: SKRSContext2D } {
-  const key = `${w}x${h}`;
-  let entry = cache.get(key);
-  if (!entry) {
-    const canvas = createCanvas(w, h);
-    entry = { canvas, ctx: canvas.getContext('2d') };
-    cache.set(key, entry);
-  }
-  return entry;
+): Canvas {
+  const key = `${assetKey}:${color}:${w}x${h}`;
+  const cached = cache.get(key);
+  if (cached) return cached;
+
+  const canvas = createCanvas(w, h);
+  const offCtx = canvas.getContext('2d');
+  offCtx.clearRect(0, 0, w, h);
+  offCtx.globalCompositeOperation = 'source-over';
+  offCtx.drawImage(asset, 0, 0, w, h);
+  offCtx.globalCompositeOperation = 'source-atop';
+  offCtx.fillStyle = color;
+  offCtx.fillRect(0, 0, w, h);
+  offCtx.globalCompositeOperation = 'source-over';
+
+  cache.set(key, canvas);
+  return canvas;
 }
 
 /**
  * Draws a note asset tinted to `color` at position (x, topY) with size (w, h).
- * Reuses a cached offscreen canvas to avoid allocating a new native canvas per call.
+ * Tinting happens once per style/color/size key, then each draw is just a blit.
  *
  * Tinting strategy:
  *   1. Clear + draw the white asset onto the offscreen canvas.
@@ -278,26 +396,19 @@ function getCachedCanvas(
 function drawTintedAsset(
   ctx: SKRSContext2D,
   asset: Image,
+  assetKey: string,
   color: string,
   alpha: number,
   x: number,
   topY: number,
   w: number,
   h: number,
-  cache: OffscreenCache,
+  cache: TintedAssetCache,
 ): void {
-  const { canvas: off, ctx: offCtx } = getCachedCanvas(cache, w, h);
-
-  offCtx.clearRect(0, 0, w, h);
-  offCtx.globalCompositeOperation = 'source-over';
-  offCtx.drawImage(asset, 0, 0, w, h);
-  offCtx.globalCompositeOperation = 'source-atop';
-  offCtx.fillStyle = color;
-  offCtx.fillRect(0, 0, w, h);
-  offCtx.globalCompositeOperation = 'source-over'; // reset for next use
+  const tintedCanvas = getTintedCanvas(cache, asset, assetKey, color, w, h);
 
   ctx.globalAlpha = alpha;
-  ctx.drawImage(off, x, topY);
+  ctx.drawImage(tintedCanvas, x, topY);
   ctx.globalAlpha = 1;
 }
 
@@ -308,40 +419,32 @@ function drawTintedAsset(
  * once at full PLAYFIELD_HEIGHT into a cached canvas, then blit only the
  * top `bodyH` rows onto the main canvas. This means hold body never
  * allocates a new canvas regardless of how many holds or frames there are.
- * Cache key: "body_W" — one entry per column width, shared across all frames.
+ * Cache key includes style/color/width so tint work happens once per variant.
  */
 function drawBodyAsset(
   ctx: SKRSContext2D,
   asset: Image,
+  assetKey: string,
   color: string,
   alpha: number,
   x: number,
   bodyTop: number,
   w: number,
   bodyH: number,
-  cache: OffscreenCache,
+  cache: TintedAssetCache,
 ): void {
-  const key = `body_${w}`;
-  let entry = cache.get(key);
-  if (!entry) {
-    const canvas = createCanvas(w, PLAYFIELD_HEIGHT);
-    entry = { canvas, ctx: canvas.getContext('2d') };
-    cache.set(key, entry);
-  }
-  const { canvas: off, ctx: offCtx } = entry;
-
-  // Re-tint whenever color changes (cheap — just two fillRect calls)
-  offCtx.clearRect(0, 0, w, PLAYFIELD_HEIGHT);
-  offCtx.globalCompositeOperation = 'source-over';
-  offCtx.drawImage(asset, 0, 0, w, PLAYFIELD_HEIGHT);
-  offCtx.globalCompositeOperation = 'source-atop';
-  offCtx.fillStyle = color;
-  offCtx.fillRect(0, 0, w, PLAYFIELD_HEIGHT);
-  offCtx.globalCompositeOperation = 'source-over';
+  const tintedCanvas = getTintedCanvas(
+    cache,
+    asset,
+    assetKey,
+    color,
+    w,
+    PLAYFIELD_HEIGHT,
+  );
 
   // Blit only the needed rows (source crop, no new allocation)
   ctx.globalAlpha = alpha;
-  ctx.drawImage(off, 0, 0, w, bodyH, x, bodyTop, w, bodyH);
+  ctx.drawImage(tintedCanvas, 0, 0, w, bodyH, x, bodyTop, w, bodyH);
   ctx.globalAlpha = 1;
 }
 
@@ -387,12 +490,23 @@ function drawNoteAsset(
   bottomY: number,
   colWidth: number,
   color: string,
-  cache: OffscreenCache,
+  cache: TintedAssetCache,
   alpha = 1,
 ): void {
   const asset = skin[style].note;
   const { x: dx, topY, w, h } = noteDrawRect(style, x, bottomY, colWidth);
-  drawTintedAsset(ctx, asset, color, alpha, dx, topY, w, h, cache);
+  drawTintedAsset(
+    ctx,
+    asset,
+    `${style}:note`,
+    color,
+    alpha,
+    dx,
+    topY,
+    w,
+    h,
+    cache,
+  );
 }
 
 function drawHoldHeadAsset(
@@ -403,11 +517,22 @@ function drawHoldHeadAsset(
   bottomY: number,
   colWidth: number,
   color: string,
-  cache: OffscreenCache,
+  cache: TintedAssetCache,
 ): void {
   const asset = skin[style].holdHead;
   const { x: dx, topY, w, h } = noteDrawRect(style, x, bottomY, colWidth);
-  drawTintedAsset(ctx, asset, color, 1, dx, topY, w, h, cache);
+  drawTintedAsset(
+    ctx,
+    asset,
+    `${style}:hold-head`,
+    color,
+    1,
+    dx,
+    topY,
+    w,
+    h,
+    cache,
+  );
 }
 
 function drawHoldTailAsset(
@@ -418,7 +543,7 @@ function drawHoldTailAsset(
   tailY: number,
   colWidth: number,
   color: string,
-  cache: OffscreenCache,
+  cache: TintedAssetCache,
 ): void {
   const asset = skin[style].holdTail;
   // Tail is always rendered as a thin horizontal bar, 8px tall, centred on tailY
@@ -426,6 +551,7 @@ function drawHoldTailAsset(
   drawTintedAsset(
     ctx,
     asset,
+    `${style}:hold-tail`,
     color,
     0.85,
     x,
@@ -443,6 +569,7 @@ export interface RenderOptions {
   noteColors?: string[];
   noteColorSpecial?: string;
   scrollDirection?: ScrollDirection;
+  strainOverlay?: boolean;
 }
 
 /**
@@ -454,6 +581,7 @@ export interface RenderOptions {
  * @param durationMs   How many milliseconds of video to generate
  * @param scrollMs     Visible time window (ms); smaller = faster scroll
  * @param onFrame      Callback with raw RGBA pixel data per frame
+ * @param fps          Output framerate for this render
  * @param renderOpts   Per-user note style/colour overrides
  */
 export async function renderFrames(
@@ -467,12 +595,13 @@ export async function renderFrames(
     frameIndex: number,
     totalFrames: number,
   ) => Promise<void>,
+  fps: number,
   renderOpts: RenderOptions = {},
 ): Promise<void> {
   const canvas = createCanvas(VIDEO_WIDTH, VIDEO_HEIGHT);
   const ctx = canvas.getContext('2d');
 
-  const totalFrames = Math.ceil((durationMs / 1000) * FPS);
+  const totalFrames = Math.ceil((durationMs / 1000) * fps);
   const keys = Math.max(1, meta.keys);
   const colWidth = Math.floor((VIDEO_WIDTH - COL_GAP * (keys + 1)) / keys);
 
@@ -481,6 +610,8 @@ export async function renderFrames(
   const noteColorSpecial: string =
     renderOpts.noteColorSpecial ?? NOTE_COLOR_SPECIAL_DEFAULT;
   const scrollDirection: ScrollDirection = renderOpts.scrollDirection ?? 'down';
+  const strainOverlayEnabled =
+    renderOpts.strainOverlay ?? STRAIN_OVERLAY_DEFAULT;
 
   // Direction-dependent layout values
   const hitLineY = scrollDirection === 'up' ? HITLINE_Y_UP : HITLINE_Y_DOWN;
@@ -488,6 +619,7 @@ export async function renderFrames(
   // For upscroll:   notes enter from the bottom (high Y) and travel to hitLineY near top.
   const noteEntryY =
     scrollDirection === 'up' ? VIDEO_HEIGHT - 70 : HEADER_HEIGHT;
+  const noteCapHeight = noteStyle === 'bar' ? NOTE_HEIGHT : colWidth;
 
   function colX(col: number): number {
     return COL_GAP * (col + 1) + col * colWidth;
@@ -507,9 +639,8 @@ export async function renderFrames(
    * Upscroll: hit line at top (HITLINE_Y_UP). Notes approaching have larger
    *   msAhead → placed lower (larger Y).
    */
-  function noteY(noteTimeMs: number, currentMs: number): number {
-    const visualMs = svVisualOffset(svTable, currentMs, noteTimeMs);
-    const fraction = visualMs / scrollMs; // 0=at hit line, positive=approaching
+  function noteY(noteVisualMs: number, currentVisualMs: number): number {
+    const fraction = (noteVisualMs - currentVisualMs) / scrollMs;
     if (scrollDirection === 'up') {
       // Notes below the hit line, moving upward
       return hitLineY + fraction * PLAYFIELD_HEIGHT;
@@ -521,6 +652,9 @@ export async function renderFrames(
   // Build the SV lookup table once for the full render window.
   // For standard maps or maps with no SV points this is a trivial 1-entry table.
   const svTable = buildSvTable(meta.svPoints, startMs, startMs + durationMs);
+  const strainFooterOverlay = strainOverlayEnabled
+    ? buildStrainFooterOverlay(meta, startMs, durationMs)
+    : null;
 
   // Pre-load assets and cover image in parallel
   const [skin, coverLoaded] = await Promise.all([
@@ -554,6 +688,8 @@ export async function renderFrames(
   const noteCount = meta.notes.length;
   const noteX: number[] = new Array(noteCount);
   const noteColor: string[] = new Array(noteCount);
+  const noteStartVisual: number[] = new Array(noteCount);
+  const noteEndVisual: number[] = new Array(noteCount);
   for (let noteIdx = 0; noteIdx < noteCount; noteIdx++) {
     const note = meta.notes[noteIdx];
     if (!note) continue;
@@ -564,6 +700,8 @@ export async function renderFrames(
       noteColors,
       noteColorSpecial,
     );
+    noteStartVisual[noteIdx] = svCumulativeAt(svTable, note.startTime);
+    noteEndVisual[noteIdx] = svCumulativeAt(svTable, note.endTime);
   }
 
   let activeStart = 0;
@@ -572,10 +710,11 @@ export async function renderFrames(
   // Offscreen canvas cache — reused across all frames to avoid per-note native allocations.
   // Note/head/tail sizes are fixed for the whole render (colWidth is constant), so the cache
   // only ever holds a small number of entries (~3 distinct sizes).
-  const offscreenCache: OffscreenCache = new Map();
+  const tintedAssetCache: TintedAssetCache = new Map();
 
   for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
-    const currentMs = startMs + (frameIdx / FPS) * 1000;
+    const currentMs = startMs + (frameIdx / fps) * 1000;
+    const currentVisualMs = svCumulativeAt(svTable, currentMs);
 
     // ── Background (cover-cropped) ────────────────────────────────────────────
     ctx.fillStyle = BG_COLOR;
@@ -621,8 +760,8 @@ export async function renderFrames(
       const x = noteX[noteIdx] ?? 0;
 
       if (note.isHold) {
-        const startY = noteY(note.startTime, currentMs);
-        const endY = noteY(note.endTime, currentMs);
+        const startY = noteY(noteStartVisual[noteIdx] ?? 0, currentVisualMs);
+        const endY = noteY(noteEndVisual[noteIdx] ?? 0, currentVisualMs);
 
         // "Head" = the end closest to the hit line.
         // Downscroll: startTime is the head (larger Y = closer to bottom hit line).
@@ -630,48 +769,41 @@ export async function renderFrames(
         const headY = startY;
         const tailY = endY;
 
-        // Style-appropriate note head height
-        const headH =
-          noteStyle === 'circle'
-            ? colWidth
-            : noteStyle === 'arrow'
-              ? colWidth
-              : NOTE_HEIGHT;
-
         // Hold body — spans between tail and the centre of the head cap.
         let bodyTop: number;
         let bodyBottom: number;
         if (scrollDirection === 'up') {
           // Upscroll: head is at the top (smaller Y), tail is below (larger Y).
           // Body runs from just below the head centre down to the tail.
-          bodyTop = Math.max(headY - headH / 2, HEADER_HEIGHT);
+          bodyTop = Math.max(headY - noteCapHeight / 2, HEADER_HEIGHT);
           bodyBottom = Math.min(tailY, noteEntryY);
         } else {
           // Downscroll: head is at the bottom (larger Y), tail is above (smaller Y).
           // Body runs from the tail down to just above the head centre.
           bodyTop = Math.max(tailY, HEADER_HEIGHT);
-          bodyBottom = Math.min(headY - headH / 2, hitLineY);
+          bodyBottom = Math.min(headY - noteCapHeight / 2, hitLineY);
         }
         const bodyH = bodyBottom - bodyTop;
         if (bodyH > 0) {
           drawBodyAsset(
             ctx,
             skin[noteStyle].holdBody,
+            `${noteStyle}:hold-body`,
             color,
             0.4,
             x + 2,
             bodyTop,
             colWidth - 4,
             bodyH,
-            offscreenCache,
+            tintedAssetCache,
           );
         }
 
         // Hold head cap
         const headVisible =
           scrollDirection === 'up'
-            ? headY >= HEADER_HEIGHT && headY <= noteEntryY + headH
-            : headY >= HEADER_HEIGHT - headH && headY <= hitLineY;
+            ? headY >= HEADER_HEIGHT && headY <= noteEntryY + noteCapHeight
+            : headY >= HEADER_HEIGHT - noteCapHeight && headY <= hitLineY;
         if (headVisible) {
           drawHoldHeadAsset(
             ctx,
@@ -681,7 +813,7 @@ export async function renderFrames(
             headY,
             colWidth,
             color,
-            offscreenCache,
+            tintedAssetCache,
           );
         }
 
@@ -699,16 +831,15 @@ export async function renderFrames(
             tailY,
             colWidth,
             color,
-            offscreenCache,
+            tintedAssetCache,
           );
         }
       } else {
-        const y = noteY(note.startTime, currentMs);
-        const noteH = noteStyle === 'bar' ? NOTE_HEIGHT : colWidth;
+        const y = noteY(noteStartVisual[noteIdx] ?? 0, currentVisualMs);
         const outOfBounds =
           scrollDirection === 'up'
-            ? y < HEADER_HEIGHT || y > noteEntryY + noteH
-            : y < HEADER_HEIGHT - noteH || y > hitLineY;
+            ? y < HEADER_HEIGHT || y > noteEntryY + noteCapHeight
+            : y < HEADER_HEIGHT - noteCapHeight || y > hitLineY;
         if (outOfBounds) continue;
 
         drawNoteAsset(
@@ -719,7 +850,7 @@ export async function renderFrames(
           y,
           colWidth,
           color,
-          offscreenCache,
+          tintedAssetCache,
         );
       }
     }
@@ -729,6 +860,17 @@ export async function renderFrames(
     ctx.fillRect(0, hitLineY - 8, VIDEO_WIDTH, 16);
     ctx.fillStyle = HITLINE_COLOR;
     ctx.fillRect(0, hitLineY - 1, VIDEO_WIDTH, 2);
+
+    // ── Footer strain chart ───────────────────────────────────────────────────
+    if (strainFooterOverlay) {
+      drawStrainFooterFrame(
+        ctx,
+        strainFooterOverlay,
+        currentMs,
+        startMs,
+        durationMs,
+      );
+    }
 
     // ── Header ────────────────────────────────────────────────────────────────
     ctx.fillStyle = HEADER_BG;

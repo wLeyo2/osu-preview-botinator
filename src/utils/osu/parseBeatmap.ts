@@ -52,6 +52,8 @@ export interface BeatmapMeta {
   strainValues: number[];
   /** Duration of each strain section in ms */
   strainSectionMs: number;
+  /** Map-time origin (ms) used for strain section index 0 */
+  strainStartMs: number;
   /**
    * SV control points from inherited timing points (green lines).
    * Only populated for mania maps. Empty array = constant SV 1.0.
@@ -60,14 +62,40 @@ export interface BeatmapMeta {
   svPoints: SvPoint[];
 }
 
-function parseMetaField(raw: string, key: string): string {
-  const match = raw.match(new RegExp(`^${key}:\\s*(.+)`, 'm'));
-  return match?.[1]?.trim() ?? '';
+type BeatmapFieldIndex = Map<string, string>;
+
+function buildFieldIndex(raw: string): BeatmapFieldIndex {
+  const fields = new Map<string, string>();
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('['))
+      continue;
+    const colon = trimmed.indexOf(':');
+    if (colon <= 0) continue;
+
+    const key = trimmed.slice(0, colon).trim();
+    if (!key || fields.has(key)) continue;
+
+    fields.set(key, trimmed.slice(colon + 1).trim());
+  }
+  return fields;
 }
 
-function parseNumericField(raw: string, key: string, fallback = 0): number {
-  const match = raw.match(new RegExp(`^${key}:\\s*([\\d.]+)`, 'm'));
-  return match ? Number(match[1]) : fallback;
+function parseMetaField(fields: BeatmapFieldIndex, key: string): string {
+  return fields.get(key) ?? '';
+}
+
+function parseNumericField(
+  fields: BeatmapFieldIndex,
+  key: string,
+  fallback = 0,
+): number {
+  const raw = fields.get(key);
+  if (!raw) return fallback;
+  const numericPrefix = raw.match(/^-?\d+(?:\.\d+)?/);
+  if (!numericPrefix) return fallback;
+  const parsed = Number(numericPrefix[0]);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 /** Parse all HitObjects from a raw .osu file for mania rendering */
@@ -76,6 +104,9 @@ function parseManiaObjects(raw: string, keys: number): ManiaNote[] {
   if (!hitObjectsSection) return [];
 
   const notes: ManiaNote[] = [];
+  let sorted = true;
+  let prevStart = Number.NEGATIVE_INFINITY;
+  let prevEnd = Number.NEGATIVE_INFINITY;
 
   for (const line of hitObjectsSection.split('\n')) {
     const trimmed = line.trim();
@@ -108,10 +139,21 @@ function parseManiaObjects(raw: string, keys: number): ManiaNote[] {
       }
     }
 
+    if (
+      startTime < prevStart ||
+      (startTime === prevStart && endTime < prevEnd)
+    ) {
+      sorted = false;
+    }
+    prevStart = startTime;
+    prevEnd = endTime;
+
     notes.push({ column, startTime, endTime, isHold });
   }
 
-  notes.sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+  if (!sorted) {
+    notes.sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+  }
   return notes;
 }
 
@@ -144,27 +186,43 @@ function computeDrainSeconds(raw: string, notes: ManiaNote[]): number {
   return Math.max(0, (lastTime - firstTime - breakMs) / 1000);
 }
 
+function computeStrainStartMs(notes: ManiaNote[], sectionMs: number): number {
+  if (notes.length === 0) return 0;
+
+  const section = Math.max(1, Math.floor(sectionMs));
+  let firstStart = Number.POSITIVE_INFINITY;
+  for (const note of notes) {
+    if (note.startTime < firstStart) {
+      firstStart = note.startTime;
+    }
+  }
+
+  if (!Number.isFinite(firstStart)) return 0;
+  return Math.max(0, Math.floor(firstStart / section) * section);
+}
+
 /**
  * Parses all relevant data from a raw .osu file for the Discord bot.
  * Uses rosu-pp-js for star rating and BPM.
  */
 export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
-  const mode = parseNumericField(rawBeatmap, 'Mode', 0);
+  const fields = buildFieldIndex(rawBeatmap);
+  const mode = parseNumericField(fields, 'Mode', 0);
 
   // Metadata
-  const title = parseMetaField(rawBeatmap, 'Title');
-  const titleUnicode = parseMetaField(rawBeatmap, 'TitleUnicode') || title;
-  const artist = parseMetaField(rawBeatmap, 'Artist');
-  const artistUnicode = parseMetaField(rawBeatmap, 'ArtistUnicode') || artist;
-  const creator = parseMetaField(rawBeatmap, 'Creator');
-  const version = parseMetaField(rawBeatmap, 'Version');
+  const title = parseMetaField(fields, 'Title');
+  const titleUnicode = parseMetaField(fields, 'TitleUnicode') || title;
+  const artist = parseMetaField(fields, 'Artist');
+  const artistUnicode = parseMetaField(fields, 'ArtistUnicode') || artist;
+  const creator = parseMetaField(fields, 'Creator');
+  const version = parseMetaField(fields, 'Version');
 
   // Difficulty fields from raw .osu
-  const hp = parseNumericField(rawBeatmap, 'HPDrainRate', 5);
-  const od = parseNumericField(rawBeatmap, 'OverallDifficulty', 5);
-  const ar = parseNumericField(rawBeatmap, 'ApproachRate', 5);
+  const hp = parseNumericField(fields, 'HPDrainRate', 5);
+  const od = parseNumericField(fields, 'OverallDifficulty', 5);
+  const ar = parseNumericField(fields, 'ApproachRate', 5);
   // In mania, CS = key count
-  const keys = Math.round(parseNumericField(rawBeatmap, 'CircleSize', 4));
+  const keys = Math.round(parseNumericField(fields, 'CircleSize', 4));
 
   // Star rating + strains via rosu-pp-js
   let stars = 0;
@@ -212,12 +270,11 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
 
   // Parse mania notes and SV points for rendering
   const notes = mode === 3 ? parseManiaObjects(rawBeatmap, keys) : [];
+  const timingNotes = notes.length > 0 ? notes : parseAllTimings(rawBeatmap);
   const svPoints = mode === 3 ? parseTimingPoints(rawBeatmap) : [];
 
-  const drainSeconds = computeDrainSeconds(
-    rawBeatmap,
-    notes.length > 0 ? notes : parseAllTimings(rawBeatmap),
-  );
+  const drainSeconds = computeDrainSeconds(rawBeatmap, timingNotes);
+  const strainStartMs = computeStrainStartMs(timingNotes, strainSectionMs);
 
   return {
     title,
@@ -237,6 +294,7 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
     notes,
     strainValues,
     strainSectionMs,
+    strainStartMs,
     svPoints,
   };
 }
@@ -255,6 +313,8 @@ function parseTimingPoints(raw: string): SvPoint[] {
   if (!section) return [];
 
   const points: SvPoint[] = [];
+  let sorted = true;
+  let previousTime = Number.NEGATIVE_INFINITY;
 
   for (const line of section.split('\n')) {
     const trimmed = line.trim();
@@ -282,11 +342,16 @@ function parseTimingPoints(raw: string): SvPoint[] {
     if (beatLength >= 0) continue;
 
     const svMultiplier = Math.max(0.01, -100 / beatLength);
+    if (time < previousTime) {
+      sorted = false;
+    }
+    previousTime = time;
     points.push({ time, svMultiplier });
   }
 
-  // Ensure sorted by time (the format requires this, but be defensive)
-  points.sort((a, b) => a.time - b.time);
+  if (!sorted) {
+    points.sort((a, b) => a.time - b.time);
+  }
   return points;
 }
 

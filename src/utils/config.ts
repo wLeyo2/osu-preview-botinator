@@ -12,7 +12,7 @@ function parseGcMode(value: string): GcMode {
     return normalized;
   }
 
-  return 'incremental';
+  return 'off';
 }
 
 const env = cleanEnv(process.env, {
@@ -41,20 +41,22 @@ const env = cleanEnv(process.env, {
   QUEUE_NOTICE_COOLDOWN_SEC: num({ default: 30 }),
   REQUEST_COOLDOWN_SEC: num({ default: 3 }),
   RENDERER_VERSION: str({ default: 'v1' }),
+  RENDER_FPS: num({ default: 45 }),
+  AUDIO_BITRATE_KBPS: num({ default: 96 }),
   AUDIO_HEADER_TIMEOUT_MS: num({ default: 8_000 }),
   AUDIO_TOTAL_TIMEOUT_MS: num({ default: 45_000 }),
   AUDIO_STALL_TIMEOUT_MS: num({ default: 8_000 }),
   AUDIO_HEDGE_DELAY_MS: num({ default: 2_000 }),
   MIRROR_COOLDOWN_SEC: num({ default: 300 }),
   COVER_FETCH_TIMEOUT_MS: num({ default: 3_000 }),
-  GC_MODE: str({ default: 'incremental' }),
-  GC_EVERY_N_JOBS: num({ default: 2 }),
+  GC_MODE: str({ default: 'off' }),
+  GC_EVERY_N_JOBS: num({ default: 1 }),
   GC_RSS_THRESHOLD_MB: num({ default: 0 }),
-  WORKER_MAX_JOBS_BEFORE_RESTART: num({ default: 0 }),
+  WORKER_MAX_JOBS_BEFORE_RESTART: num({ default: 1 }),
   WORKER_RESTART_RSS_MB: num({ default: 0 }),
   WORKER_REDIS_ERROR_BUDGET: num({ default: 5 }),
   WORKER_REDIS_ERROR_WINDOW_MS: num({ default: 15_000 }),
-  WORKER_BEATMAP_CACHE_SIZE: num({ default: 128 }),
+  WORKER_BEATMAP_CACHE_SIZE: num({ default: 0 }),
   CLOUD_ENDPOINT: str(),
   CLOUD_ACCESKEY: str(),
   CLOUD_SECRETKEY: str(),
@@ -64,6 +66,11 @@ const env = cleanEnv(process.env, {
 
 const workerConcurrency = Math.max(1, Math.min(2, env.WORKER_CONCURRENCY));
 const ffmpegThreads = Math.max(1, Math.min(2, env.FFMPEG_THREADS));
+const renderFps = Math.max(24, Math.min(60, Math.floor(env.RENDER_FPS)));
+const audioBitrateKbps = Math.max(
+  64,
+  Math.min(320, Math.floor(env.AUDIO_BITRATE_KBPS)),
+);
 
 export default {
   token: env.TOKEN,
@@ -93,6 +100,8 @@ export default {
   },
   render: {
     ffmpegThreads,
+    fps: renderFps,
+    audioBitrateKbps,
     cacheTtlSec: Math.max(60, env.RENDER_CACHE_TTL_SEC),
     deliveryDedupWindowSec: Math.max(10, env.DELIVERY_DEDUP_WINDOW_SEC),
     rendererVersion: env.RENDERER_VERSION,

@@ -35,9 +35,6 @@ export async function enqueueRenderJob(
   renderKey: string,
   data: RenderJobData,
 ): Promise<{ created: boolean }> {
-  const existing = await videoQueue.getJob(renderKey);
-  if (existing) return { created: false };
-
   try {
     await videoQueue.add(RENDER_JOB_NAME, data, {
       jobId: renderKey,
@@ -45,8 +42,7 @@ export async function enqueueRenderJob(
     return { created: true };
   } catch (err) {
     if (isDuplicateJobError(err)) {
-      const job = await videoQueue.getJob(renderKey);
-      if (job) return { created: false };
+      return { created: false };
     }
     throw err;
   }
@@ -91,7 +87,7 @@ export async function getQueueBacklog(): Promise<QueueBacklog> {
 }
 
 export function estimateQueueWaitSeconds(backlog: QueueBacklog): number {
-  const effectiveWorkers = Math.max(1, config.queue.workerConcurrency);
+  const effectiveWorkers = config.queue.workerConcurrency;
   const queuedAhead = backlog.waiting + backlog.delayed + backlog.prioritized;
   const estimatedJobsAhead = queuedAhead + Math.max(0, backlog.active - 1);
   const estimatedSeconds =

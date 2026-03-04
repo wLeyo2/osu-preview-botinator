@@ -24,6 +24,7 @@ import {
 import { type BeatmapMeta, parseBeatmap } from '@/utils/osu/parseBeatmap';
 
 const WORKER_RECYCLE_EXIT_CODE = 75;
+const SIGTERM_EXIT_CODE = 143;
 
 interface MemorySnapshot {
   rssMb: number;
@@ -48,6 +49,8 @@ let shuttingDown = false;
 
 const beatmapMetaCache = new Map<string, BeatmapMeta>();
 const redisErrorTimestamps: number[] = [];
+let redisErrorHead = 0;
+const supportedModes = new Set(SUPPORTED_MODES);
 
 try {
   await preflightRedisConnection('redis-worker-preflight');
@@ -212,17 +215,25 @@ function shouldStopOnRedisErrors(): boolean {
   const now = Date.now();
   const windowMs = config.render.workerRedisErrorWindowMs;
 
-  while (redisErrorTimestamps.length > 0) {
-    const oldest = redisErrorTimestamps[0];
+  while (redisErrorHead < redisErrorTimestamps.length) {
+    const oldest = redisErrorTimestamps[redisErrorHead];
     if (oldest && now - oldest > windowMs) {
-      redisErrorTimestamps.shift();
+      redisErrorHead += 1;
       continue;
     }
     break;
   }
 
+  if (redisErrorHead > 0 && redisErrorHead * 2 >= redisErrorTimestamps.length) {
+    redisErrorTimestamps.splice(0, redisErrorHead);
+    redisErrorHead = 0;
+  }
+
   redisErrorTimestamps.push(now);
-  return redisErrorTimestamps.length >= config.render.workerRedisErrorBudget;
+  return (
+    redisErrorTimestamps.length - redisErrorHead >=
+    config.render.workerRedisErrorBudget
+  );
 }
 
 const worker = new Worker<RenderJobData, RenderResult>(
@@ -270,7 +281,7 @@ const worker = new Worker<RenderJobData, RenderResult>(
         (performance.now() - parseStart).toFixed(2),
       );
 
-      if (!SUPPORTED_MODES.includes(meta.mode)) {
+      if (!supportedModes.has(meta.mode)) {
         throw new UnrecoverableError(
           'This beatmap mode is not supported. Only osu!standard and osu!mania are supported.',
         );
@@ -373,7 +384,7 @@ const worker = new Worker<RenderJobData, RenderResult>(
       const recycleReason = shouldRecycleWorker(memoryAfterGc);
       if (recycleReason && !shuttingDown) {
         logger.warn(`[Worker] recycle requested: ${recycleReason}`);
-        void shutdown(WORKER_RECYCLE_EXIT_CODE);
+        void shutdown(WORKER_RECYCLE_EXIT_CODE, 'recycle');
       }
     }
   },
@@ -396,7 +407,7 @@ worker.on('error', (err) => {
 
   if (!shouldStopOnRedisErrors()) {
     logger.warn(
-      `[Worker] Redis error budget used ${redisErrorTimestamps.length}/${config.render.workerRedisErrorBudget}; waiting for recovery...`,
+      `[Worker] Redis error budget used ${redisErrorTimestamps.length - redisErrorHead}/${config.render.workerRedisErrorBudget}; waiting for recovery...`,
     );
     return;
   }
@@ -404,26 +415,26 @@ worker.on('error', (err) => {
   logger.error(
     '[Worker] Redis error budget exhausted. Exiting worker process.',
   );
-  void shutdown(1);
+  void shutdown(1, 'redis-error-budget');
 });
 
 logger.info(
   `[Worker] listening queue=${config.queue.name} concurrency=${config.queue.workerConcurrency}`,
 );
 
-async function shutdown(exitCode: number): Promise<void> {
+async function shutdown(exitCode: number, reason = 'manual'): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  logger.info('[Worker] shutting down gracefully...');
+  logger.info(`[Worker] shutting down gracefully... reason=${reason}`);
   await Promise.allSettled([worker.close(), closeStoreConnection()]);
   process.exit(exitCode);
 }
 
 process.on('SIGINT', () => {
-  void shutdown(0);
+  void shutdown(0, 'sigint');
 });
 
 process.on('SIGTERM', () => {
-  void shutdown(0);
+  void shutdown(SIGTERM_EXIT_CODE, 'sigterm');
 });
