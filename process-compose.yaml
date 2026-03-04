@@ -6,7 +6,6 @@ processes:
     working_dir: "."
     availability:
       restart: "on_failure"
-      max_restarts: 5
     log_location: "./logs/discord-bot.log"
 
   render-worker:
@@ -14,5 +13,4 @@ processes:
     working_dir: "."
     availability:
       restart: "on_failure"
-      max_restarts: 5
     log_location: "./logs/render-worker.log"

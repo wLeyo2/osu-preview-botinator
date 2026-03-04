@@ -12,6 +12,32 @@ import { queueEvents, videoQueue } from './videoQueue';
 
 let started = false;
 let notifierClient: Client | null = null;
+const MAX_NOTIFY_CONCURRENCY = 4;
+
+async function forEachWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(Math.max(1, concurrency), items.length) },
+    async () => {
+      while (true) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= items.length) return;
+        const item = items[currentIndex];
+        if (!item) continue;
+        await worker(item);
+      }
+    },
+  );
+
+  await Promise.allSettled(workers);
+}
 
 async function sendToChannel(
   client: Client,
@@ -28,6 +54,7 @@ async function sendToChannel(
 
 async function notifyCompleted(renderKey: string): Promise<void> {
   if (!notifierClient) return;
+  const client = notifierClient;
 
   const subscriptions = await getChannelSubscriptions(renderKey);
   if (subscriptions.length === 0) return;
@@ -50,28 +77,33 @@ async function notifyCompleted(renderKey: string): Promise<void> {
     return;
   }
 
-  for (const sub of subscriptions) {
-    const canDeliver = await acquireDeliveryWindow(
-      renderKey,
-      sub.guildId,
-      sub.channelId,
-    );
-    if (!canDeliver) continue;
+  await forEachWithConcurrency(
+    subscriptions,
+    MAX_NOTIFY_CONCURRENCY,
+    async (sub) => {
+      const canDeliver = await acquireDeliveryWindow(
+        renderKey,
+        sub.guildId,
+        sub.channelId,
+      );
+      if (!canDeliver) return;
 
-    const source =
-      result.sourceUrl || `https://osu.ppy.sh/b/${result.beatmapId}`;
-    await sendToChannel(
-      notifierClient,
-      sub.channelId,
-      `Preview ready for <${source}>\n${result.videoUrl}`,
-    );
-  }
+      const source =
+        result.sourceUrl || `https://osu.ppy.sh/b/${result.beatmapId}`;
+      await sendToChannel(
+        client,
+        sub.channelId,
+        `Preview ready for <${source}>\n${result.videoUrl}`,
+      );
+    },
+  );
 
   await clearChannelSubscriptions(renderKey);
 }
 
 async function notifyFailed(renderKey: string, reason: string): Promise<void> {
   if (!notifierClient) return;
+  const client = notifierClient;
 
   const job = await videoQueue.getJob(renderKey);
   if (job) {
@@ -86,13 +118,17 @@ async function notifyFailed(renderKey: string, reason: string): Promise<void> {
   const shortReason =
     reason.length > 180 ? `${reason.slice(0, 180)}...` : reason;
 
-  for (const sub of subscriptions) {
-    await sendToChannel(
-      notifierClient,
-      sub.channelId,
-      `Failed to render preview for <${source}>: ${shortReason}`,
-    );
-  }
+  await forEachWithConcurrency(
+    subscriptions,
+    MAX_NOTIFY_CONCURRENCY,
+    async (sub) => {
+      await sendToChannel(
+        client,
+        sub.channelId,
+        `Failed to render preview for <${source}>: ${shortReason}`,
+      );
+    },
+  );
 
   await clearChannelSubscriptions(renderKey);
 }

@@ -3,7 +3,9 @@ import type { RenderMode } from '@/utils/osu/userPrefs';
 import {
   getUserPrefs,
   RENDER_MODE_DEFAULT,
+  STRAIN_OVERLAY_DEFAULT,
   setRenderMode,
+  setStrainOverlay,
 } from '@/utils/osu/userPrefs';
 import type { Command } from '@/utils/types/command';
 
@@ -16,9 +18,7 @@ const MODE_DESCRIPTIONS: Record<RenderMode, string> = {
 export const command: Command = {
   data: new SlashCommandBuilder()
     .setName('rendermode')
-    .setDescription(
-      'Set how long maps (>4 min drain) are rendered — last 4 min or around the preview point',
-    )
+    .setDescription('Set long-map render mode and strain footer visibility')
     .addStringOption((opt) =>
       opt
         .setName('mode')
@@ -27,29 +27,48 @@ export const command: Command = {
           { name: 'Last 4 minutes (default)', value: 'last4min' },
           { name: 'Around preview point', value: 'preview' },
         ),
+    )
+    .addBooleanOption((opt) =>
+      opt
+        .setName('strain')
+        .setDescription('Show the subtle strain chart in the footer'),
     ),
   async execute(interaction) {
     await interaction.deferReply({ ephemeral: true });
 
     const userId = interaction.user.id;
+    const prefs = getUserPrefs(userId);
     const modeInput = interaction.options.getString(
       'mode',
     ) as RenderMode | null;
+    const strainInput = interaction.options.getBoolean('strain');
 
     // No option — show current setting
-    if (!modeInput) {
-      const current = getUserPrefs(userId).renderMode ?? RENDER_MODE_DEFAULT;
+    if (!modeInput && strainInput === null) {
+      const current = prefs.renderMode ?? RENDER_MODE_DEFAULT;
+      const strainOverlay = prefs.strainOverlay ?? STRAIN_OVERLAY_DEFAULT;
       await interaction.editReply(
         `Your render mode: **${current}** — ${MODE_DESCRIPTIONS[current]}\n` +
-          `Use \`/rendermode mode:\` to change.`,
+          `Strain footer: **${strainOverlay ? 'on' : 'off'}**\n` +
+          `Use \`/rendermode mode:\` and/or \`/rendermode strain:\` to change.`,
       );
       return;
     }
 
-    setRenderMode(userId, modeInput);
+    const updates: string[] = [];
 
-    await interaction.editReply(
-      `Render mode set to **${modeInput}** — ${MODE_DESCRIPTIONS[modeInput]}`,
-    );
+    if (modeInput) {
+      setRenderMode(userId, modeInput);
+      updates.push(
+        `Render mode: **${modeInput}** — ${MODE_DESCRIPTIONS[modeInput]}`,
+      );
+    }
+
+    if (strainInput !== null) {
+      setStrainOverlay(userId, strainInput);
+      updates.push(`Strain footer: **${strainInput ? 'on' : 'off'}**`);
+    }
+
+    await interaction.editReply(updates.join('\n'));
   },
 };

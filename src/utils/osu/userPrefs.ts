@@ -23,6 +23,7 @@ export type ScrollDirection = 'down' | 'up';
 export const NOTE_STYLE_DEFAULT: NoteStyle = 'bar';
 export const RENDER_MODE_DEFAULT: RenderMode = 'last4min';
 export const SCROLL_DIRECTION_DEFAULT: ScrollDirection = 'down';
+export const STRAIN_OVERLAY_DEFAULT = true;
 
 /** Default note colors — alternating blue/white with yellow for centre column */
 export const NOTE_COLORS_DEFAULT = ['#00aaff', '#ffffff', '#00aaff', '#ffffff'];
@@ -38,6 +39,8 @@ export interface UserPrefs {
   renderMode: RenderMode;
   /** Which direction notes travel toward the hit line */
   scrollDirection: ScrollDirection;
+  /** Whether to show the strain footer overlay in rendered previews */
+  strainOverlay: boolean;
 }
 
 const userPrefs = new Map<string, UserPrefs>();
@@ -49,6 +52,7 @@ function defaultPrefs(): UserPrefs {
     noteColorSpecial: NOTE_COLOR_SPECIAL_DEFAULT,
     renderMode: RENDER_MODE_DEFAULT,
     scrollDirection: SCROLL_DIRECTION_DEFAULT,
+    strainOverlay: STRAIN_OVERLAY_DEFAULT,
   };
 }
 
@@ -95,6 +99,10 @@ export function setScrollDirection(
   direction: ScrollDirection,
 ): void {
   ensureUser(userId).scrollDirection = direction;
+}
+
+export function setStrainOverlay(userId: string, enabled: boolean): void {
+  ensureUser(userId).strainOverlay = enabled;
 }
 
 /** Reset a user's preferences to defaults */

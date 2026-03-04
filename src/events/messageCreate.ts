@@ -24,15 +24,16 @@ import { getUserPrefs } from '@/utils/osu/userPrefs';
 import type { Event } from '@/utils/types/event';
 
 const requestCooldown = new Cooldown(config.queue.requestCooldownSec);
-
-function isAllowedGuild(guildId: string): boolean {
-  const allowedGuilds = config.guildId
+const allowedGuildIds = new Set(
+  config.guildId
     .split(',')
     .map((id) => id.trim())
-    .filter(Boolean);
+    .filter(Boolean),
+);
 
-  if (allowedGuilds.length === 0) return false;
-  return allowedGuilds.includes(guildId);
+function isAllowedGuild(guildId: string): boolean {
+  if (allowedGuildIds.size === 0) return false;
+  return allowedGuildIds.has(guildId);
 }
 
 export const event: Event<Events.MessageCreate> = {
@@ -85,6 +86,7 @@ export const event: Event<Events.MessageCreate> = {
       noteColors: userPrefs.noteColors,
       noteColorSpecial: userPrefs.noteColorSpecial,
       scrollDirection: userPrefs.scrollDirection,
+      strainOverlay: userPrefs.strainOverlay,
     };
 
     const renderKey = buildRenderKey({

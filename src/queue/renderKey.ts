@@ -8,6 +8,7 @@ import {
   RENDER_MODE_DEFAULT,
   type RenderMode,
   SCROLL_DIRECTION_DEFAULT,
+  STRAIN_OVERLAY_DEFAULT,
 } from '@/utils/osu/userPrefs';
 
 interface RenderKeyInput {
@@ -27,12 +28,14 @@ function normalizeRenderOptions(opts: RenderOptions): RenderOptions {
       opts.noteColorSpecial ?? NOTE_COLOR_SPECIAL_DEFAULT
     ).toLowerCase(),
     scrollDirection: opts.scrollDirection ?? SCROLL_DIRECTION_DEFAULT,
+    strainOverlay: opts.strainOverlay ?? STRAIN_OVERLAY_DEFAULT,
   };
 }
 
 export function buildRenderKey(input: RenderKeyInput): string {
   const normalizedPayload = {
     v: config.render.rendererVersion,
+    fps: config.render.fps,
     beatmapId: input.beatmapId,
     scrollMs: Math.max(1, Math.floor(input.scrollMs)),
     renderMode: input.renderMode || RENDER_MODE_DEFAULT,
