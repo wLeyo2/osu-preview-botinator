@@ -41,7 +41,7 @@ export const command: Command = {
 
     // No option given — show current
     if (!preset && !customMs) {
-      const current = getScrollMs(userId);
+      const current = await getScrollMs(userId);
       await interaction.editReply(
         `Your scroll speed: **${current} ms** (${speedLabel(current)}). Lower = faster notes.\nUse \`/scrollspeed preset:\` or \`/scrollspeed ms:\` to change.`,
       );
@@ -58,7 +58,7 @@ export const command: Command = {
       newMs = DEFAULT_SCROLL_MS;
     }
 
-    setScrollMs(userId, newMs);
+    await setScrollMs(userId, newMs);
 
     await interaction.editReply(
       `Scroll speed set to **${newMs} ms** (${speedLabel(newMs)}).`,

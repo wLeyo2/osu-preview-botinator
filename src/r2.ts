@@ -1,6 +1,8 @@
 import { createHash, createHmac } from 'node:crypto';
 import { createReadStream, statSync } from 'node:fs';
+import { URL } from 'node:url';
 import config from '@/utils/config';
+import { resolveHostname } from '@/utils/doh';
 import logger from '@/utils/logger';
 
 const UPLOAD_TIMEOUT_MS = 90_000; // 1.5 minutes
@@ -160,6 +162,12 @@ async function uploadAttempt(
 
   try {
     const url = new URL(config.r2.endpoint);
+    const originalHostname = url.hostname;
+
+    logger.info(`[R2 Upload] Resolving ${originalHostname} via DoH...`);
+    const resolvedIp = await resolveHostname(originalHostname);
+    logger.info(`[R2 Upload] Resolved ${originalHostname} to ${resolvedIp}`);
+
     const host = url.host;
     const path = `/${config.r2.bucket}/${fileName}`;
 
@@ -188,10 +196,11 @@ async function uploadAttempt(
     const headersForFetch: Record<string, string> = {
       ...headersForSignature,
       authorization: authorizationHeader,
+      host: host,
       'content-length': String(fileSize),
     };
 
-    const uploadUrl = `${config.r2.endpoint}${path}`;
+    const uploadUrl = `${url.protocol}//${resolvedIp}${path}`;
     logger.debug(`[R2 Upload] PUT request to: ${uploadUrl}`);
     logger.debug(
       `[R2 Upload] Headers: ${JSON.stringify(headersForFetch, null, 2)}`,
