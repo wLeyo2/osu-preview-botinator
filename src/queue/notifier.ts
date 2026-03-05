@@ -3,8 +3,10 @@ import logger from '@/utils/logger';
 import {
   acquireDeliveryWindow,
   clearChannelSubscriptions,
+  clearQueueStatusMessageId,
   getCachedRenderResult,
   getChannelSubscriptions,
+  getQueueStatusMessageId,
   setCachedRenderResult,
 } from './store';
 import type { RenderResult } from './types';
@@ -39,17 +41,78 @@ async function forEachWithConcurrency<T>(
   await Promise.allSettled(workers);
 }
 
+type SendableTextChannel = {
+  send: (payload: { content: string }) => Promise<unknown>;
+  messages: {
+    fetch: (messageId: string) => Promise<{
+      edit: (payload: { content: string }) => Promise<unknown>;
+    }>;
+  };
+};
+
+async function fetchSendableChannel(
+  client: Client,
+  channelId: string,
+): Promise<SendableTextChannel | null> {
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel || !channel.isTextBased() || !('messages' in channel)) {
+    return null;
+  }
+
+  return channel as SendableTextChannel;
+}
+
 async function sendToChannel(
   client: Client,
   channelId: string,
   content: string,
 ): Promise<void> {
-  const channel = await client.channels.fetch(channelId).catch(() => null);
-  if (!channel || !channel.isTextBased()) return;
-  const sendable = channel as {
-    send: (payload: { content: string }) => Promise<unknown>;
-  };
-  await sendable.send({ content }).catch(() => {});
+  const channel = await fetchSendableChannel(client, channelId);
+  if (!channel) return;
+  await channel.send({ content }).catch(() => {});
+}
+
+async function editQueueStatusMessage(
+  client: Client,
+  renderKey: string,
+  guildId: string,
+  channelId: string,
+  content: string,
+): Promise<boolean> {
+  const statusMessageId = await getQueueStatusMessageId(
+    renderKey,
+    guildId,
+    channelId,
+  );
+  if (!statusMessageId) return false;
+
+  const channel = await fetchSendableChannel(client, channelId);
+  if (!channel) {
+    await clearQueueStatusMessageId(renderKey, guildId, channelId).catch(
+      () => {},
+    );
+    return false;
+  }
+
+  const statusMessage = await channel.messages
+    .fetch(statusMessageId)
+    .catch(() => null);
+  if (!statusMessage) {
+    await clearQueueStatusMessageId(renderKey, guildId, channelId).catch(
+      () => {},
+    );
+    return false;
+  }
+
+  const edited = await statusMessage.edit({ content }).catch(() => null);
+  if (!edited) {
+    await clearQueueStatusMessageId(renderKey, guildId, channelId).catch(
+      () => {},
+    );
+    return false;
+  }
+
+  return true;
 }
 
 async function notifyCompleted(renderKey: string): Promise<void> {
@@ -88,13 +151,23 @@ async function notifyCompleted(renderKey: string): Promise<void> {
       );
       if (!canDeliver) return;
 
-      const source =
-        result.sourceUrl || `https://osu.ppy.sh/b/${result.beatmapId}`;
-      await sendToChannel(
+      const content = result.videoUrl;
+      const edited = await editQueueStatusMessage(
         client,
+        renderKey,
+        sub.guildId,
         sub.channelId,
-        `Preview ready for <${source}>\n${result.videoUrl}`,
+        content,
       );
+      if (!edited) {
+        await sendToChannel(client, sub.channelId, content);
+      }
+
+      await clearQueueStatusMessageId(
+        renderKey,
+        sub.guildId,
+        sub.channelId,
+      ).catch(() => {});
     },
   );
 
@@ -122,11 +195,23 @@ async function notifyFailed(renderKey: string, reason: string): Promise<void> {
     subscriptions,
     MAX_NOTIFY_CONCURRENCY,
     async (sub) => {
-      await sendToChannel(
+      const content = `Failed to render preview for <${source}>: ${shortReason}`;
+      const edited = await editQueueStatusMessage(
         client,
+        renderKey,
+        sub.guildId,
         sub.channelId,
-        `Failed to render preview for <${source}>: ${shortReason}`,
+        content,
       );
+      if (!edited) {
+        await sendToChannel(client, sub.channelId, content);
+      }
+
+      await clearQueueStatusMessageId(
+        renderKey,
+        sub.guildId,
+        sub.channelId,
+      ).catch(() => {});
     },
   );
 

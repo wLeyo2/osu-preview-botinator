@@ -43,18 +43,32 @@ function queueNoticeKey(
   return key('render', 'queue-notice', guildId, channelId, renderKey);
 }
 
+function queueStatusMessageKey(
+  renderKey: string,
+  guildId: string,
+  channelId: string,
+): string {
+  return key('render', 'queue-status-message', guildId, channelId, renderKey);
+}
+
 function userPrefsKey(userId: string): string {
   return key('user', 'prefs', userId);
 }
 
-function encodeSub(guildId: string, channelId: string): string {
-  return `${guildId}:${channelId}`;
+function encodeSub(
+  guildId: string,
+  channelId: string,
+  messageId?: string,
+): string {
+  return messageId
+    ? `${guildId}:${channelId}:${messageId}`
+    : `${guildId}:${channelId}`;
 }
 
 function decodeSub(token: string): ChannelSubscription | null {
-  const [guildId, channelId] = token.split(':');
+  const [guildId, channelId, messageId] = token.split(':');
   if (!guildId || !channelId) return null;
-  return { guildId, channelId };
+  return { guildId, channelId, messageId };
 }
 
 export async function getCachedRenderResult(
@@ -90,8 +104,9 @@ export async function addChannelSubscription(
   renderKey: string,
   guildId: string,
   channelId: string,
+  messageId?: string,
 ): Promise<void> {
-  const token = encodeSub(guildId, channelId);
+  const token = encodeSub(guildId, channelId, messageId);
   const subKey = subscriptionsKey(renderKey);
   const client = getRedis();
   await client
@@ -105,10 +120,11 @@ export async function removeChannelSubscription(
   renderKey: string,
   guildId: string,
   channelId: string,
+  messageId?: string,
 ): Promise<void> {
   await getRedis().srem(
     subscriptionsKey(renderKey),
-    encodeSub(guildId, channelId),
+    encodeSub(guildId, channelId, messageId),
   );
 }
 
@@ -161,6 +177,36 @@ export async function acquireQueueNoticeWindow(
     'NX',
   );
   return result === 'OK';
+}
+
+export async function getQueueStatusMessageId(
+  renderKey: string,
+  guildId: string,
+  channelId: string,
+): Promise<string | null> {
+  return getRedis().get(queueStatusMessageKey(renderKey, guildId, channelId));
+}
+
+export async function setQueueStatusMessageId(
+  renderKey: string,
+  guildId: string,
+  channelId: string,
+  messageId: string,
+): Promise<void> {
+  await getRedis().set(
+    queueStatusMessageKey(renderKey, guildId, channelId),
+    messageId,
+    'EX',
+    Math.max(config.render.cacheTtlSec, 3_600),
+  );
+}
+
+export async function clearQueueStatusMessageId(
+  renderKey: string,
+  guildId: string,
+  channelId: string,
+): Promise<void> {
+  await getRedis().del(queueStatusMessageKey(renderKey, guildId, channelId));
 }
 
 export async function getUserPrefsFromRedis(

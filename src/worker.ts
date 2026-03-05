@@ -340,6 +340,7 @@ const worker = new Worker<RenderJobData, RenderResult>(
         sourceUrl,
         beatmapId,
         beatmapSetId,
+        beatmapTitle: `${meta.artist} - ${meta.title} [${meta.version}]`,
         videoUrl,
         createdAt: Date.now(),
       };

@@ -1,11 +1,13 @@
-import { Events } from 'discord.js';
+import { Events, type Message } from 'discord.js';
 import { buildRenderKey } from '@/queue/renderKey';
 import {
   acquireDeliveryWindow,
   acquireQueueNoticeWindow,
   addChannelSubscription,
   getCachedRenderResult,
+  getQueueStatusMessageId,
   removeChannelSubscription,
+  setQueueStatusMessageId,
 } from '@/queue/store';
 import type { RenderJobData } from '@/queue/types';
 import {
@@ -34,6 +36,44 @@ const allowedGuildIds = new Set(
 function isAllowedGuild(guildId: string): boolean {
   if (allowedGuildIds.size === 0) return false;
   return allowedGuildIds.has(guildId);
+}
+
+async function upsertQueueStatusMessage(
+  message: Message,
+  renderKey: string,
+  content: string,
+): Promise<void> {
+  if (!message.guild) return;
+  if (!message.channel.isTextBased() || !('messages' in message.channel))
+    return;
+
+  const guildId = message.guild.id;
+  const channelId = message.channel.id;
+  const existingStatusMessageId = await getQueueStatusMessageId(
+    renderKey,
+    guildId,
+    channelId,
+  );
+
+  if (existingStatusMessageId) {
+    const existingMessage = await message.channel.messages
+      .fetch(existingStatusMessageId)
+      .catch(() => null);
+    if (existingMessage) {
+      const edited = await existingMessage.edit({ content }).catch(() => null);
+      if (edited) return;
+    }
+  }
+
+  const createdMessage = await message.reply({ content }).catch(() => null);
+  if (!createdMessage) return;
+
+  await setQueueStatusMessageId(
+    renderKey,
+    guildId,
+    channelId,
+    createdMessage.id,
+  ).catch(() => {});
 }
 
 export const event: Event<Events.MessageCreate> = {
@@ -202,13 +242,13 @@ export const event: Event<Events.MessageCreate> = {
         message.channel.id,
       );
       if (shouldNotice) {
-        await message
-          .reply({
-            content: created
-              ? `Render queued (queue ${queueDepth}, ETA ~${etaMinutes} min). I will post the video URL in this channel when it is ready.`
-              : `This preview is already rendering (queue ${queueDepth}, ETA ~${etaMinutes} min). I will post the video URL here when it is ready.`,
-          })
-          .catch(() => {});
+        await upsertQueueStatusMessage(
+          message,
+          renderKey,
+          created
+            ? `Render queued (queue ${queueDepth}, ETA ~${etaMinutes} min).`
+            : `This preview is already rendering (queue ${queueDepth}, ETA ~${etaMinutes} min).`,
+        );
       }
 
       logger.info(

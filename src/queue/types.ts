@@ -17,6 +17,7 @@ export interface RenderResult {
   sourceUrl: string;
   beatmapId: string;
   beatmapSetId: string;
+  beatmapTitle?: string;
   videoUrl: string;
   createdAt: number;
 }
@@ -24,4 +25,5 @@ export interface RenderResult {
 export interface ChannelSubscription {
   guildId: string;
   channelId: string;
+  messageId?: string;
 }
