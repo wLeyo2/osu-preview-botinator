@@ -3,7 +3,7 @@ import { UnrecoverableError, Worker } from 'bullmq';
 import { bullConnection, preflightRedisConnection } from '@/queue/connection';
 import { closeStoreConnection, setCachedRenderResult } from '@/queue/store';
 import type { RenderJobData, RenderResult } from '@/queue/types';
-import { uploadVideoToR2 } from '@/r2';
+import { pruneBucketLimit, uploadVideoToR2 } from '@/r2';
 import config from '@/utils/config';
 import logger from '@/utils/logger';
 import { SUPPORTED_MODES } from '@/utils/osu/constants';
@@ -349,6 +349,13 @@ const worker = new Worker<RenderJobData, RenderResult>(
       await setCachedRenderResult(renderKey, result);
       stageMs.cacheWrite = Number((performance.now() - cacheStart).toFixed(2));
 
+      // Asynchronously prune R2 bucket to enforce capacity limits
+      Promise.resolve()
+        .then(() => pruneBucketLimit())
+        .catch((err) => {
+          logger.error(`[Worker] Unhandled error during pruneBucketLimit: ${err instanceof Error ? err.message : String(err)}`);
+        });
+
       const totalMs = Number((performance.now() - jobStartMs).toFixed(2));
       const memoryEnd = memorySnapshot();
       const lagP95Ms = Number((loopDelay.percentile(95) / 1e6).toFixed(2));
@@ -356,9 +363,9 @@ const worker = new Worker<RenderJobData, RenderResult>(
 
       logger.info(
         `[Worker] completed key=${renderKey} beatmap=${beatmapId} total=${totalMs}ms ` +
-          `stages(fetch=${stageMs.fetchBeatmap}ms parse=${stageMs.parseBeatmap}ms audio=${stageMs.audioFetch}ms cover=${stageMs.coverFetch}ms encode=${stageMs.encodeVideo}ms upload=${stageMs.upload}ms cache=${stageMs.cacheWrite}ms) ` +
-          `eventLoop(p95=${lagP95Ms}ms max=${lagMaxMs}ms) ` +
-          `${formatMemory(memoryEnd)}`,
+        `stages(fetch=${stageMs.fetchBeatmap}ms parse=${stageMs.parseBeatmap}ms audio=${stageMs.audioFetch}ms cover=${stageMs.coverFetch}ms encode=${stageMs.encodeVideo}ms upload=${stageMs.upload}ms cache=${stageMs.cacheWrite}ms) ` +
+        `eventLoop(p95=${lagP95Ms}ms max=${lagMaxMs}ms) ` +
+        `${formatMemory(memoryEnd)}`,
       );
 
       return result;
@@ -366,7 +373,7 @@ const worker = new Worker<RenderJobData, RenderResult>(
       throw classifyJobError(error);
     } finally {
       if (videoPath) {
-        await cleanupVideo(videoPath).catch(() => {});
+        await cleanupVideo(videoPath).catch(() => { });
       }
 
       jobsProcessed += 1;
@@ -378,8 +385,8 @@ const worker = new Worker<RenderJobData, RenderResult>(
 
       logger.info(
         `[Worker metrics] key=${renderKey} processed=${jobsProcessed} total=${totalMs}ms ` +
-          `memory(start=${formatMemory(memoryStart)} preGC=${formatMemory(memoryBeforeGc)} postGC=${formatMemory(memoryAfterGc)}) ` +
-          `gc(ran=${gcResult.ran} mode=${gcResult.mode} reason=${gcResult.reason} duration=${gcResult.durationMs}ms)`,
+        `memory(start=${formatMemory(memoryStart)} preGC=${formatMemory(memoryBeforeGc)} postGC=${formatMemory(memoryAfterGc)}) ` +
+        `gc(ran=${gcResult.ran} mode=${gcResult.mode} reason=${gcResult.reason} duration=${gcResult.durationMs}ms)`,
       );
 
       const recycleReason = shouldRecycleWorker(memoryAfterGc);

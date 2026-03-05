@@ -265,3 +265,152 @@ async function uploadAttempt(
     clearTimeout(timeoutId);
   }
 }
+
+interface R2Object {
+  Key: string;
+  LastModified: Date;
+}
+
+export async function listVideosInR2(): Promise<R2Object[]> {
+  const url = new URL(config.r2.endpoint);
+  const resolvedIp = await resolveHostname(url.hostname);
+  const host = url.host;
+
+  // S3 API ListObjectsV2 with prefix
+  const searchParams = new URLSearchParams();
+  searchParams.set('list-type', '2');
+  searchParams.set('prefix', 'preview/');
+
+  const query = _getCanonicalQueryString(searchParams);
+  const path = `/${config.r2.bucket}`;
+
+  const date = new Date();
+  const amzDate = getAmzDate(date);
+
+  const headersForSignature: Record<string, string> = {
+    host,
+    'x-amz-date': amzDate,
+    'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
+  };
+
+  const { authorizationHeader } = createSignatureV4(
+    'GET',
+    path,
+    query,
+    headersForSignature,
+    'UNSIGNED-PAYLOAD',
+    date,
+    'auto',
+    's3',
+  );
+
+  const headersForFetch: Record<string, string> = {
+    ...headersForSignature,
+    authorization: authorizationHeader,
+  };
+
+  const reqUrl = `${url.protocol}//${resolvedIp}${path}?${query}`;
+  const response = await fetch(reqUrl, {
+    method: 'GET',
+    headers: headersForFetch,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to list R2 objects: ${response.status} ${await response.text()}`);
+  }
+
+  const xml = await response.text();
+
+  // Basic Regex XML parsing since we only need Key and LastModified
+  const objects: R2Object[] = [];
+  const matches = xml.matchAll(/<Contents>.*?<Key>(.*?)<\/Key>.*?<LastModified>(.*?)<\/LastModified>.*?<\/Contents>/gs);
+  for (const match of Array.from(matches)) {
+    if (match[1] && match[2]) {
+      objects.push({
+        Key: match[1],
+        LastModified: new Date(match[2]),
+      });
+    }
+  }
+
+  return objects;
+}
+
+export async function deleteVideosFromR2(keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
+
+  const url = new URL(config.r2.endpoint);
+  const resolvedIp = await resolveHostname(url.hostname);
+  const host = url.host;
+
+  const path = `/${config.r2.bucket}`;
+  const query = 'delete=';
+
+  const date = new Date();
+  const amzDate = getAmzDate(date);
+
+  // Build XML payload for S3 DeleteObjects
+  const objectsXml = keys.map(k => `<Object><Key>${k}</Key></Object>`).join('');
+  const payload = `<?xml version="1.0" encoding="UTF-8"?>\n<Delete>${objectsXml}<Quiet>true</Quiet></Delete>`;
+  const payloadBuffer = Buffer.from(payload);
+  const payloadHash = getSha256(payloadBuffer);
+
+  const headersForSignature: Record<string, string> = {
+    host,
+    'x-amz-date': amzDate,
+    'x-amz-content-sha256': payloadHash,
+    'content-type': 'application/xml',
+    'content-md5': createHash('md5').update(payloadBuffer).digest('base64'),
+  };
+
+  const { authorizationHeader } = createSignatureV4(
+    'POST',
+    path,
+    query,
+    headersForSignature,
+    payloadHash,
+    date,
+    'auto',
+    's3',
+  );
+
+  const headersForFetch: Record<string, string> = {
+    ...headersForSignature,
+    authorization: authorizationHeader,
+    'content-length': String(payloadBuffer.length),
+  };
+
+  const reqUrl = `${url.protocol}//${resolvedIp}${path}?delete`;
+  const response = await fetch(reqUrl, {
+    method: 'POST',
+    headers: headersForFetch,
+    body: payloadBuffer,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to delete R2 objects: ${response.status} ${await response.text()}`);
+  }
+}
+
+export async function pruneBucketLimit(): Promise<void> {
+  if (config.r2.maxCapacity <= 0) return;
+
+  try {
+    const videos = await listVideosInR2();
+    if (videos.length <= config.r2.maxCapacity) {
+      return;
+    }
+
+    // Sort oldest first
+    videos.sort((a, b) => a.LastModified.getTime() - b.LastModified.getTime());
+
+    const numToDelete = videos.length - config.r2.maxCapacity;
+    const toDelete = videos.slice(0, numToDelete).map(v => v.Key);
+
+    logger.info(`[R2 Prune] Bucket capacity exceeded (${videos.length}/${config.r2.maxCapacity}). Deleting ${numToDelete} oldest videos...`);
+    await deleteVideosFromR2(toDelete);
+    logger.info(`[R2 Prune] Deleted ${numToDelete} old videos successfully.`);
+  } catch (err) {
+    logger.error(`[R2 Prune] Failed to prune bucket: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}

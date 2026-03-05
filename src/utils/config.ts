@@ -62,6 +62,7 @@ const env = cleanEnv(process.env, {
   CLOUD_SECRETKEY: str(),
   R2_PUBLIC_URL: str(),
   R2_BUCKET: str(),
+  R2_MAX_CAPACITY: num({ default: 50 }),
 });
 
 const workerConcurrency = Math.max(1, Math.min(2, env.WORKER_CONCURRENCY));
@@ -126,5 +127,6 @@ export default {
     secretAccessKey: env.CLOUD_SECRETKEY,
     publicUrl: env.R2_PUBLIC_URL,
     bucket: env.R2_BUCKET,
+    maxCapacity: Math.max(0, env.R2_MAX_CAPACITY),
   },
 };
