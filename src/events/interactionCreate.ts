@@ -1,4 +1,5 @@
 import { Events, MessageFlags } from 'discord.js';
+import { getCachedRenderResult } from '@/queue/store';
 import { Cooldown } from '@/utils/cooldown';
 import logger from '@/utils/logger';
 import type { Event } from '@/utils/types/event';
@@ -9,13 +10,24 @@ export const event: Event<Events.InteractionCreate> = {
   name: Events.InteractionCreate,
 
   async execute(interaction) {
+    if (interaction.isButton()) {
+      const customId = interaction.customId;
+
+      if (customId?.startsWith('reveal-video:')) {
+        await handleRevealButton(interaction);
+        return;
+      }
+
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     if (cooldown.check(interaction.user.id)) {
       const remaining = cooldown.getRemainingTime(interaction.user.id);
 
       await interaction.reply({
-        content: `Please wait ${remaining}s before using the command again`,
+        content: `Please wait ${remaining}s before using a command again`,
         flags: MessageFlags.Ephemeral,
       });
 
@@ -53,3 +65,20 @@ export const event: Event<Events.InteractionCreate> = {
     }
   },
 };
+
+async function handleRevealButton(interaction: any): Promise<void> {
+  const renderKey = interaction.customId.split(':')[1];
+
+  const result = await getCachedRenderResult(renderKey);
+  if (!result) {
+    await interaction.reply({
+      content: 'Preview not found or may have expired.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  await interaction.reply({
+    content: `🎬 ${result.videoUrl}`,
+  });
+}

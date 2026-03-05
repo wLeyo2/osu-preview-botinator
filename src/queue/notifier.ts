@@ -1,4 +1,5 @@
 import type { Client } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import logger from '@/utils/logger';
 import {
   acquireDeliveryWindow,
@@ -43,13 +44,17 @@ async function sendToChannel(
   client: Client,
   channelId: string,
   content: string,
+  components: ActionRowBuilder[] | undefined = undefined,
 ): Promise<void> {
   const channel = await client.channels.fetch(channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
   const sendable = channel as {
-    send: (payload: { content: string }) => Promise<unknown>;
+    send: (payload: {
+      content: string;
+      components?: ActionRowBuilder[];
+    }) => Promise<unknown>;
   };
-  await sendable.send({ content }).catch(() => {});
+  await sendable.send({ content, components }).catch(() => {});
 }
 
 async function notifyCompleted(renderKey: string): Promise<void> {
@@ -90,11 +95,17 @@ async function notifyCompleted(renderKey: string): Promise<void> {
 
       const source =
         result.sourceUrl || `https://osu.ppy.sh/b/${result.beatmapId}`;
-      await sendToChannel(
-        client,
-        sub.channelId,
-        `Preview ready for <${source}>\n${result.videoUrl}`,
-      );
+
+      const revealButton = new ButtonBuilder()
+        .setCustomId(`reveal-video:${renderKey}`)
+        .setLabel('👁️ Watch Preview')
+        .setStyle(ButtonStyle.Primary);
+
+      const row = new ActionRowBuilder().addComponents(revealButton);
+
+      const spoilerContent = `Preview ready for ${source}\n||${result.videoUrl}||`;
+
+      await sendToChannel(client, sub.channelId, spoilerContent, [row]);
     },
   );
 

@@ -1,4 +1,4 @@
-import { Events } from 'discord.js';
+import { Events, MessageFlags } from 'discord.js';
 import { buildRenderKey } from '@/queue/renderKey';
 import {
   acquireDeliveryWindow,
@@ -55,6 +55,7 @@ export const event: Event<Events.MessageCreate> = {
       await message
         .reply({
           content: `Please wait ${remaining}s before requesting again.`,
+          flags: MessageFlags.Ephemeral,
         })
         .catch(() => {});
       return;
@@ -74,6 +75,7 @@ export const event: Event<Events.MessageCreate> = {
       await message
         .reply({
           content: err instanceof Error ? err.message : 'Invalid osu! URL.',
+          flags: MessageFlags.Ephemeral,
         })
         .catch(() => {});
       return;
@@ -125,6 +127,7 @@ export const event: Event<Events.MessageCreate> = {
               .reply({
                 content:
                   'That preview was already posted in this channel recently. Ask again in a few minutes to repost the cached URL.',
+                flags: MessageFlags.Ephemeral,
               })
               .catch(() => {});
           }
@@ -159,6 +162,7 @@ export const event: Event<Events.MessageCreate> = {
               content:
                 `Render queue is currently full (${backlogBefore.totalPending}/${config.queue.maxBacklog}). ` +
                 `Please retry in a few minutes (estimated wait ~${etaMinutes} min).`,
+              flags: MessageFlags.Ephemeral,
             })
             .catch(() => {});
         }
@@ -207,6 +211,7 @@ export const event: Event<Events.MessageCreate> = {
             content: created
               ? `Render queued (queue ${queueDepth}, ETA ~${etaMinutes} min). I will post the video URL in this channel when it is ready.`
               : `This preview is already rendering (queue ${queueDepth}, ETA ~${etaMinutes} min). I will post the video URL here when it is ready.`,
+            flags: MessageFlags.Ephemeral,
           })
           .catch(() => {});
       }
@@ -227,6 +232,7 @@ export const event: Event<Events.MessageCreate> = {
         .reply({
           content:
             'Failed to queue preview render. Please try again in a moment.',
+          flags: MessageFlags.Ephemeral,
         })
         .catch(() => {});
     }
