@@ -2,6 +2,7 @@
 import { exec } from 'node:child_process';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { promisify } from 'node:util';
+import logger from '@/utils/logger';
 
 const execAsync = promisify(exec);
 
@@ -14,10 +15,6 @@ interface DiagnosticResult {
 
 const results: DiagnosticResult[] = [];
 
-function _log(...args: unknown[]) {
-  console.log(...args);
-}
-
 function record(
   test: string,
   status: DiagnosticResult['status'],
@@ -28,9 +25,9 @@ function record(
   results.push(result);
 
   const statusEmoji = { PASS: '✓', FAIL: '✗', WARN: '⚠', SKIP: '⊘' }[status];
-  console.log(`${statusEmoji} ${test}: ${message}`);
+  logger.info(`${statusEmoji} ${test}: ${message}`);
   if (details) {
-    console.log(`  ${details}`);
+    logger.info(`  ${details}`);
   }
 }
 
@@ -272,32 +269,32 @@ async function checkNodeVersion() {
 }
 
 function printSummary() {
-  console.log(`\n${'='.repeat(60)}`);
-  console.log('DIAGNOSTIC SUMMARY');
-  console.log('='.repeat(60));
+  logger.info(`\n${'='.repeat(60)}`);
+  logger.info('DIAGNOSTIC SUMMARY');
+  logger.info('='.repeat(60));
 
   const passed = results.filter((r) => r.status === 'PASS').length;
   const failed = results.filter((r) => r.status === 'FAIL').length;
   const warned = results.filter((r) => r.status === 'WARN').length;
   const skipped = results.filter((r) => r.status === 'SKIP').length;
 
-  console.log(
+  logger.info(
     `\nTotal: ${results.length} | ✓ ${passed} | ✗ ${failed} | ⚠ ${warned} | ⊘ ${skipped}\n`,
   );
 
   if (failed > 0) {
-    console.log('FAILURES:');
+    logger.info('FAILURES:');
     results
       .filter((r) => r.status === 'FAIL')
       .forEach((r) => {
-        console.log(`  - ${r.test}: ${r.message}`);
+        logger.info(`  - ${r.test}: ${r.message}`);
         if (r.details) {
-          console.log(`    ${r.details}`);
+          logger.info(`    ${r.details}`);
         }
       });
   }
 
-  console.log('\nRECOMMENDATIONS:');
+  logger.info('\nRECOMMENDATIONS:');
 
   const hasConnectivityFail = results.some(
     (r) => r.status === 'FAIL' && r.test.includes('Connectivity'),
@@ -313,56 +310,56 @@ function printSummary() {
   );
 
   if (hasDnsFail) {
-    console.log(
+    logger.info(
       '  1. Try using different DNS servers (e.g., 8.8.8.8, 1.1.1.1)',
     );
   }
 
   if (hasConnectivityFail) {
-    console.log(
+    logger.info(
       '  2. Check your local firewall rules for outbound HTTPS (443)',
     );
-    console.log('  3. Try disabling VPN or proxy temporarily');
-    console.log('  4. Test from a different network (e.g., mobile hotspot)');
+    logger.info('  3. Try disabling VPN or proxy temporarily');
+    logger.info('  4. Test from a different network (e.g., mobile hotspot)');
   }
 
   if (hasFirewallWarn) {
-    console.log(
+    logger.info(
       '  5. Verify firewall allows outbound HTTPS to *.r2.cloudflarestorage.com',
     );
   }
 
   if (hasProxyWarn) {
-    console.log(
+    logger.info(
       '  6. Ensure Node.js/Bun can use your proxy if one is configured',
     );
   }
 
   if (!hasConnectivityFail && !hasDnsFail) {
-    console.log('  - Basic connectivity appears OK. The issue may be:');
-    console.log('    1. R2 credentials misconfiguration');
-    console.log('    2. AWS signature calculation issue');
-    console.log(
+    logger.info('  - Basic connectivity appears OK. The issue may be:');
+    logger.info('    1. R2 credentials misconfiguration');
+    logger.info('    2. AWS signature calculation issue');
+    logger.info(
       '    3. Node.js/Bun fetch() implementation specific to this endpoint',
     );
   }
 
-  console.log('\nNEXT STEPS:');
-  console.log(
+  logger.info('\nNEXT STEPS:');
+  logger.info(
     "  - If curl works but Node.js fails, it's a language/library issue",
   );
-  console.log("  - If both fail, it's a network/firewall issue");
-  console.log(
+  logger.info("  - If both fail, it's a network/firewall issue");
+  logger.info(
     '  - Check the actual error message in your application logs for more detail',
   );
-  console.log();
+  logger.info('');
 }
 
 async function main() {
-  console.log('='.repeat(60));
-  console.log('R2 CONNECTIVITY DIAGNOSTIC TOOL');
-  console.log('='.repeat(60));
-  console.log();
+  logger.info('='.repeat(60));
+  logger.info('R2 CONNECTIVITY DIAGNOSTIC TOOL');
+  logger.info('='.repeat(60));
+  logger.info('');
 
   const R2_ENDPOINT =
     'https://8d8dc787cf8713fa3df18d38c65bf7f0.r2.cloudflarestorage.com';
@@ -375,24 +372,24 @@ async function main() {
   await checkNodeVersion();
   await checkProxy();
 
-  console.log('\n--- DNS Tests ---');
+  logger.info('\n--- DNS Tests ---');
   await checkDnsResolution(R2_HOSTNAME);
   await checkDnsResolution('cloudflare.com');
 
-  console.log('\n--- Basic Connectivity Tests ---');
+  logger.info('\n--- Basic Connectivity Tests ---');
   await checkConnectivity(CLOUDFLARE_TEST);
   await checkConnectivity(GOOGLE_DNS);
   await checkConnectivity('https://cloudflare.com');
 
-  console.log('\n--- R2-Specific Tests ---');
+  logger.info('\n--- R2-Specific Tests ---');
   await checkConnectivity(R2_PUBLIC_URL);
   await checkConnectivity(R2_ENDPOINT);
 
-  console.log('\n--- System Network Tests ---');
+  logger.info('\n--- System Network Tests ---');
   await checkLocalNetwork();
   await checkFirewall();
 
-  console.log('\n--- curl Comparison Tests ---');
+  logger.info('\n--- curl Comparison Tests ---');
   await checkCurlConnectivity(R2_PUBLIC_URL);
   await checkCurlConnectivity(R2_ENDPOINT);
 

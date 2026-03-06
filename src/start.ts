@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { preflightRedisConnection } from '@/queue/connection';
+import logger from '@/utils/logger';
 
 const MAX_RESTARTS = 5;
 const RESTART_WINDOW_MS = 60_000;
@@ -34,14 +35,7 @@ for (const spec of processSpecs) {
 let shuttingDown = false;
 let shutdownCode = 0;
 let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
-
-function log(message: string): void {
-  console.log(`[start] ${message}`);
-}
-
-function logError(message: string): void {
-  console.error(`[start] ${message}`);
-}
+const orchestratorLogger = logger.child({ service: 'orchestrator' });
 
 function isExited(child: ChildProcess | null): boolean {
   if (!child) return true;
@@ -81,10 +75,16 @@ function spawnManagedProcess(item: ManagedProcess): void {
   });
 
   item.process = child;
-  log(`${item.spec.name} started`);
+  orchestratorLogger.info(
+    { process: item.spec.name },
+    'Managed process started',
+  );
 
   child.on('error', (error) => {
-    logError(`${item.spec.name} failed to start: ${error.message}`);
+    orchestratorLogger.error(
+      { process: item.spec.name, reason: error.message },
+      'Managed process failed to start',
+    );
     scheduleRestartOrShutdown(item, 1, null);
   });
 
@@ -96,7 +96,10 @@ function spawnManagedProcess(item: ManagedProcess): void {
     }
 
     const detail = signal ? `signal ${signal}` : `code ${code ?? 0}`;
-    logError(`${item.spec.name} exited with ${detail}`);
+    orchestratorLogger.error(
+      { process: item.spec.name, detail },
+      'Managed process exited unexpectedly',
+    );
     scheduleRestartOrShutdown(item, code ?? 1, signal);
   });
 }
@@ -109,8 +112,13 @@ function scheduleRestartOrShutdown(
   if (shuttingDown) return;
 
   if (!canRestartProcess(item)) {
-    logError(
-      `${item.spec.name} exceeded restart limit (${MAX_RESTARTS} in ${RESTART_WINDOW_MS / 1000}s)`,
+    orchestratorLogger.error(
+      {
+        process: item.spec.name,
+        maxRestarts: MAX_RESTARTS,
+        restartWindowSec: RESTART_WINDOW_MS / 1000,
+      },
+      'Managed process exceeded restart limit',
     );
     requestShutdown(code === 0 ? 1 : code, signal ?? 'SIGTERM');
     return;
@@ -118,8 +126,14 @@ function scheduleRestartOrShutdown(
 
   recordRestart(item);
   const attempts = item.restartTimestamps.length;
-  log(
-    `restarting ${item.spec.name} in ${RESTART_DELAY_MS}ms (attempt ${attempts}/${MAX_RESTARTS})`,
+  orchestratorLogger.warn(
+    {
+      process: item.spec.name,
+      delayMs: RESTART_DELAY_MS,
+      attempt: attempts,
+      maxRestarts: MAX_RESTARTS,
+    },
+    'Scheduling managed process restart',
   );
 
   setTimeout(() => {
@@ -153,7 +167,7 @@ function requestShutdown(code: number, signal: NodeJS.Signals): void {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  log(`shutting down children with ${signal}`);
+  orchestratorLogger.info({ signal }, 'Shutting down managed processes');
   stopChildren(signal);
 
   forceKillTimer = setTimeout(() => {
@@ -166,12 +180,13 @@ function requestShutdown(code: number, signal: NodeJS.Signals): void {
 
 async function main(): Promise<void> {
   try {
-    log('running Redis preflight...');
+    orchestratorLogger.info('Running Redis preflight');
     await preflightRedisConnection('redis-start-preflight');
-    log('Redis preflight passed');
+    orchestratorLogger.info('Redis preflight passed');
   } catch (error) {
-    logError(
-      `Redis preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+    orchestratorLogger.error(
+      { reason: error instanceof Error ? error.message : String(error) },
+      'Redis preflight failed',
     );
     process.exit(1);
   }

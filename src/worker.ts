@@ -43,6 +43,7 @@ interface GcResult {
 
 const loopDelay = monitorEventLoopDelay({ resolution: 20 });
 loopDelay.enable();
+const workerLogger = logger.child({ service: 'worker' });
 
 let jobsProcessed = 0;
 let shuttingDown = false;
@@ -55,8 +56,9 @@ const supportedModes = new Set(SUPPORTED_MODES);
 try {
   await preflightRedisConnection('redis-worker-preflight');
 } catch (error) {
-  logger.error(
-    `[Worker] Redis preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+  workerLogger.error(
+    { reason: error instanceof Error ? error.message : String(error) },
+    'Redis preflight failed',
   );
   process.exit(1);
 }
@@ -74,10 +76,6 @@ function memorySnapshot(): MemorySnapshot {
     externalMb: toMb(usage.external),
     arrayBuffersMb: toMb(usage.arrayBuffers),
   };
-}
-
-function formatMemory(snapshot: MemorySnapshot): string {
-  return `rss=${snapshot.rssMb}MB heap=${snapshot.heapUsedMb}/${snapshot.heapTotalMb}MB ext=${snapshot.externalMb}MB ab=${snapshot.arrayBuffersMb}MB`;
 }
 
 function isLikelyPermanentError(message: string): boolean {
@@ -264,8 +262,14 @@ const worker = new Worker<RenderJobData, RenderResult>(
     const memoryStart = memorySnapshot();
     loopDelay.reset();
 
-    logger.info(
-      `[Worker] start key=${renderKey} beatmap=${beatmapId} attempt=${job.attemptsMade + 1} ${formatMemory(memoryStart)}`,
+    workerLogger.info(
+      {
+        renderKey,
+        beatmapId,
+        attempt: job.attemptsMade + 1,
+        memory: memoryStart,
+      },
+      'Job started',
     );
 
     try {
@@ -353,7 +357,10 @@ const worker = new Worker<RenderJobData, RenderResult>(
       Promise.resolve()
         .then(() => pruneBucketLimit())
         .catch((err) => {
-          logger.error(`[Worker] Unhandled error during pruneBucketLimit: ${err instanceof Error ? err.message : String(err)}`);
+          workerLogger.error(
+            { reason: err instanceof Error ? err.message : String(err) },
+            'Unhandled error during pruneBucketLimit',
+          );
         });
 
       const totalMs = Number((performance.now() - jobStartMs).toFixed(2));
@@ -361,11 +368,27 @@ const worker = new Worker<RenderJobData, RenderResult>(
       const lagP95Ms = Number((loopDelay.percentile(95) / 1e6).toFixed(2));
       const lagMaxMs = Number((loopDelay.max / 1e6).toFixed(2));
 
-      logger.info(
-        `[Worker] completed key=${renderKey} beatmap=${beatmapId} total=${totalMs}ms ` +
-        `stages(fetch=${stageMs.fetchBeatmap}ms parse=${stageMs.parseBeatmap}ms audio=${stageMs.audioFetch}ms cover=${stageMs.coverFetch}ms encode=${stageMs.encodeVideo}ms upload=${stageMs.upload}ms cache=${stageMs.cacheWrite}ms) ` +
-        `eventLoop(p95=${lagP95Ms}ms max=${lagMaxMs}ms) ` +
-        `${formatMemory(memoryEnd)}`,
+      workerLogger.info(
+        {
+          renderKey,
+          beatmapId,
+          totalMs,
+          encodeMs: stageMs.encodeVideo,
+          uploadMs: stageMs.upload,
+          eventLoopP95Ms: lagP95Ms,
+          eventLoopMaxMs: lagMaxMs,
+          memory: memoryEnd,
+        },
+        'Job completed',
+      );
+
+      workerLogger.debug(
+        {
+          renderKey,
+          beatmapId,
+          stages: stageMs,
+        },
+        'Job stage timing breakdown',
       );
 
       return result;
@@ -373,7 +396,7 @@ const worker = new Worker<RenderJobData, RenderResult>(
       throw classifyJobError(error);
     } finally {
       if (videoPath) {
-        await cleanupVideo(videoPath).catch(() => { });
+        await cleanupVideo(videoPath).catch(() => {});
       }
 
       jobsProcessed += 1;
@@ -383,15 +406,24 @@ const worker = new Worker<RenderJobData, RenderResult>(
       const memoryAfterGc = memorySnapshot();
       const totalMs = Number((performance.now() - jobStartMs).toFixed(2));
 
-      logger.info(
-        `[Worker metrics] key=${renderKey} processed=${jobsProcessed} total=${totalMs}ms ` +
-        `memory(start=${formatMemory(memoryStart)} preGC=${formatMemory(memoryBeforeGc)} postGC=${formatMemory(memoryAfterGc)}) ` +
-        `gc(ran=${gcResult.ran} mode=${gcResult.mode} reason=${gcResult.reason} duration=${gcResult.durationMs}ms)`,
+      workerLogger.debug(
+        {
+          renderKey,
+          jobsProcessed,
+          totalMs,
+          memory: {
+            start: memoryStart,
+            preGc: memoryBeforeGc,
+            postGc: memoryAfterGc,
+          },
+          gc: gcResult,
+        },
+        'Post-job metrics',
       );
 
       const recycleReason = shouldRecycleWorker(memoryAfterGc);
       if (recycleReason && !shuttingDown) {
-        logger.warn(`[Worker] recycle requested: ${recycleReason}`);
+        workerLogger.warn({ reason: recycleReason }, 'Recycle requested');
         void shutdown(WORKER_RECYCLE_EXIT_CODE, 'recycle');
       }
     }
@@ -403,38 +435,48 @@ const worker = new Worker<RenderJobData, RenderResult>(
 );
 
 worker.on('failed', (job, err) => {
-  logger.error(
-    `[Worker] failed key=${job?.data.renderKey ?? 'unknown'} reason=${err.message}`,
+  workerLogger.error(
+    {
+      renderKey: job?.data.renderKey ?? 'unknown',
+      reason: err.message,
+    },
+    'Job failed',
   );
 });
 
 worker.on('error', (err) => {
-  logger.error(`Worker error: ${err.message}`);
+  workerLogger.error({ reason: err.message }, 'Worker runtime error');
 
   if (!isRedisConnectivityError(err.message)) return;
 
   if (!shouldStopOnRedisErrors()) {
-    logger.warn(
-      `[Worker] Redis error budget used ${redisErrorTimestamps.length - redisErrorHead}/${config.render.workerRedisErrorBudget}; waiting for recovery...`,
+    workerLogger.warn(
+      {
+        used: redisErrorTimestamps.length - redisErrorHead,
+        budget: config.render.workerRedisErrorBudget,
+      },
+      'Redis error budget usage increasing',
     );
     return;
   }
 
-  logger.error(
-    '[Worker] Redis error budget exhausted. Exiting worker process.',
-  );
+  workerLogger.error('Redis error budget exhausted. Exiting worker process.');
   void shutdown(1, 'redis-error-budget');
 });
 
-logger.info(
-  `[Worker] listening queue=${config.queue.name} concurrency=${config.queue.workerConcurrency}`,
+workerLogger.info(
+  {
+    queue: config.queue.name,
+    concurrency: config.queue.workerConcurrency,
+  },
+  'Worker listening',
 );
 
 async function shutdown(exitCode: number, reason = 'manual'): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  logger.info(`[Worker] shutting down gracefully... reason=${reason}`);
+  workerLogger.info({ reason }, 'Shutting down gracefully');
   await Promise.allSettled([worker.close(), closeStoreConnection()]);
   process.exit(exitCode);
 }

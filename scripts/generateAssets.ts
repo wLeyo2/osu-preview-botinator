@@ -10,6 +10,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCanvas } from '@napi-rs/canvas';
+import logger from '@/utils/logger';
 
 const SIZE = 128;
 const R = SIZE / 2; // radius for circles
@@ -17,7 +18,7 @@ const R = SIZE / 2; // radius for circles
 function save(dir: string, name: string, data: Buffer) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, name), data);
-  console.log(`  wrote ${join(dir, name)}`);
+  logger.info(`  wrote ${join(dir, name)}`);
 }
 
 function newCanvas(w = SIZE, h = SIZE) {
@@ -278,7 +279,7 @@ function generateArrowHoldBody(): Buffer {
 
 const base = join(import.meta.dir, '..', 'assets', 'notes');
 
-console.log('Generating note assets...');
+logger.info('Generating note assets...');
 
 const styles: Array<{
   dir: string;
@@ -311,11 +312,11 @@ const styles: Array<{
 ];
 
 for (const { dir, note, holdHead, holdTail, holdBody } of styles) {
-  console.log(`\n${dir.split('/').at(-1)}:`);
+  logger.info(`\n${dir.split('/').at(-1)}:`);
   save(dir, 'note.png', note());
   save(dir, 'hold-head.png', holdHead());
   save(dir, 'hold-tail.png', holdTail());
   save(dir, 'hold-body.png', holdBody());
 }
 
-console.log('\nDone.');
+logger.info('\nDone.');

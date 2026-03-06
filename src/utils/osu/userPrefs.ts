@@ -106,10 +106,11 @@ export async function setNoteStyle(
 ): Promise<void> {
   const prefs = ensureUser(userId);
   prefs.noteStyle = style;
+  redisCacheMisses.delete(userId);
 
   try {
-    const { setUserPrefsToRedis } = await import('@/queue/store');
-    await setUserPrefsToRedis(userId, prefs);
+    const { setUserPrefsFieldToRedis } = await import('@/queue/store');
+    await setUserPrefsFieldToRedis(userId, 'noteStyle', style);
   } catch (_error) {}
 }
 
@@ -123,15 +124,22 @@ export async function setNoteColor(
   hex: string,
 ): Promise<void> {
   const prefs = ensureUser(userId);
+  let field: 'noteColors' | 'noteColorSpecial' = 'noteColors';
+  let value = '';
+
   if (colIndex === 'special') {
     prefs.noteColorSpecial = hex;
+    field = 'noteColorSpecial';
+    value = hex;
   } else {
     prefs.noteColors[colIndex] = hex;
+    value = JSON.stringify(prefs.noteColors);
   }
+  redisCacheMisses.delete(userId);
 
   try {
-    const { setUserPrefsToRedis } = await import('@/queue/store');
-    await setUserPrefsToRedis(userId, prefs);
+    const { setUserPrefsFieldToRedis } = await import('@/queue/store');
+    await setUserPrefsFieldToRedis(userId, field, value);
   } catch (_error) {}
 }
 
@@ -141,10 +149,11 @@ export async function setRenderMode(
 ): Promise<void> {
   const prefs = ensureUser(userId);
   prefs.renderMode = mode;
+  redisCacheMisses.delete(userId);
 
   try {
-    const { setUserPrefsToRedis } = await import('@/queue/store');
-    await setUserPrefsToRedis(userId, prefs);
+    const { setUserPrefsFieldToRedis } = await import('@/queue/store');
+    await setUserPrefsFieldToRedis(userId, 'renderMode', mode);
   } catch (_error) {}
 }
 
@@ -154,20 +163,35 @@ export async function setScrollDirection(
 ): Promise<void> {
   const prefs = ensureUser(userId);
   prefs.scrollDirection = direction;
+  redisCacheMisses.delete(userId);
 
   try {
-    const { setUserPrefsToRedis } = await import('@/queue/store');
-    await setUserPrefsToRedis(userId, prefs);
+    const { setUserPrefsFieldToRedis } = await import('@/queue/store');
+    await setUserPrefsFieldToRedis(userId, 'scrollDirection', direction);
   } catch (_error) {}
 }
 
-export function setStrainOverlay(userId: string, enabled: boolean): void {
+export async function setStrainOverlay(
+  userId: string,
+  enabled: boolean,
+): Promise<void> {
   ensureUser(userId).strainOverlay = enabled;
+  redisCacheMisses.delete(userId);
+
+  try {
+    const { setUserPrefsFieldToRedis } = await import('@/queue/store');
+    await setUserPrefsFieldToRedis(
+      userId,
+      'strainOverlay',
+      enabled ? '1' : '0',
+    );
+  } catch (_error) {}
 }
 
 /** Reset a user's preferences to defaults */
 export async function resetUserPrefs(userId: string): Promise<void> {
   userPrefs.delete(userId);
+  redisCacheMisses.delete(userId);
 
   try {
     const { deleteUserPrefsFromRedis } = await import('@/queue/store');
