@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import logger from '@/utils/logger';
 import { getScrollMs, setScrollMs } from '@/utils/osu/scrollSpeed';
 import {
   getUserPrefs,
@@ -8,53 +9,53 @@ import {
 
 async function testPersistence() {
   const testUserId = `test-user-${Date.now()}`;
-  console.log(`Testing persistence with user ID: ${testUserId}\n`);
+  logger.info(`Testing persistence with user ID: ${testUserId}\n`);
 
-  console.log('1. Getting initial preferences (should be defaults)...');
+  logger.info('1. Getting initial preferences (should be defaults)...');
   const initialPrefs = await getUserPrefs(testUserId);
-  console.log(`   noteStyle: ${initialPrefs.noteStyle}`);
-  console.log(`   scrollDirection: ${initialPrefs.scrollDirection}`);
-  console.log(`   renderMode: ${initialPrefs.renderMode}`);
+  logger.info(`   noteStyle: ${initialPrefs.noteStyle}`);
+  logger.info(`   scrollDirection: ${initialPrefs.scrollDirection}`);
+  logger.info(`   renderMode: ${initialPrefs.renderMode}`);
 
-  console.log('\n2. Getting initial scroll speed (should be default)...');
+  logger.info('\n2. Getting initial scroll speed (should be default)...');
   const initialScroll = await getScrollMs(testUserId);
-  console.log(`   scrollMs: ${initialScroll}`);
+  logger.info(`   scrollMs: ${initialScroll}`);
 
-  console.log('\n3. Setting noteStyle to "circle"...');
+  logger.info('\n3. Setting noteStyle to "circle"...');
   await setNoteStyle(testUserId, 'circle');
 
-  console.log('4. Setting scrollDirection to "up"...');
+  logger.info('4. Setting scrollDirection to "up"...');
   await setScrollDirection(testUserId, 'up');
 
-  console.log('5. Setting scroll speed to 450ms...');
+  logger.info('5. Setting scroll speed to 450ms...');
   await setScrollMs(testUserId, 450);
 
-  console.log('\n6. Getting updated preferences...');
+  logger.info('\n6. Getting updated preferences...');
   const updatedPrefs = await getUserPrefs(testUserId);
-  console.log(`   noteStyle: ${updatedPrefs.noteStyle}`);
-  console.log(`   scrollDirection: ${updatedPrefs.scrollDirection}`);
+  logger.info(`   noteStyle: ${updatedPrefs.noteStyle}`);
+  logger.info(`   scrollDirection: ${updatedPrefs.scrollDirection}`);
 
-  console.log('\n7. Getting updated scroll speed...');
+  logger.info('\n7. Getting updated scroll speed...');
   const updatedScroll = await getScrollMs(testUserId);
-  console.log(`   scrollMs: ${updatedScroll}`);
+  logger.info(`   scrollMs: ${updatedScroll}`);
 
-  console.log('\n8. Checking in-memory cache consistency...');
+  logger.info('\n8. Checking in-memory cache consistency...');
   const prefsAgain = await getUserPrefs(testUserId);
   const scrollAgain = await getScrollMs(testUserId);
-  console.log(`   noteStyle (from cache): ${prefsAgain.noteStyle}`);
-  console.log(`   scrollMs (from cache): ${scrollAgain}`);
+  logger.info(`   noteStyle (from cache): ${prefsAgain.noteStyle}`);
+  logger.info(`   scrollMs (from cache): ${scrollAgain}`);
 
   if (
     prefsAgain.noteStyle === 'circle' &&
     prefsAgain.scrollDirection === 'up' &&
     scrollAgain === 450
   ) {
-    console.log('\n✓ All tests passed! Persistence is working correctly.');
-    console.log(
+    logger.info('\n✓ All tests passed! Persistence is working correctly.');
+    logger.info(
       '\nNote: Settings should persist in Redis even after bot restart.',
     );
   } else {
-    console.log('\n✗ Tests failed! Values do not match.');
+    logger.info('\n✗ Tests failed! Values do not match.');
   }
 }
 

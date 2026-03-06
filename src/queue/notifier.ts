@@ -69,7 +69,7 @@ async function sendToChannel(
 ): Promise<void> {
   const channel = await fetchSendableChannel(client, channelId);
   if (!channel) return;
-  await channel.send({ content }).catch(() => { });
+  await channel.send({ content }).catch(() => {});
 }
 
 async function editQueueStatusMessage(
@@ -89,7 +89,7 @@ async function editQueueStatusMessage(
   const channel = await fetchSendableChannel(client, channelId);
   if (!channel) {
     await clearQueueStatusMessageId(renderKey, guildId, channelId).catch(
-      () => { },
+      () => {},
     );
     return false;
   }
@@ -99,7 +99,7 @@ async function editQueueStatusMessage(
     .catch(() => null);
   if (!statusMessage) {
     await clearQueueStatusMessageId(renderKey, guildId, channelId).catch(
-      () => { },
+      () => {},
     );
     return false;
   }
@@ -107,7 +107,7 @@ async function editQueueStatusMessage(
   const edited = await statusMessage.edit({ content }).catch(() => null);
   if (!edited) {
     await clearQueueStatusMessageId(renderKey, guildId, channelId).catch(
-      () => { },
+      () => {},
     );
     return false;
   }
@@ -168,7 +168,7 @@ async function notifyCompleted(renderKey: string): Promise<void> {
         renderKey,
         sub.guildId,
         sub.channelId,
-      ).catch(() => { });
+      ).catch(() => {});
     },
   );
 
@@ -212,7 +212,7 @@ async function notifyFailed(renderKey: string, reason: string): Promise<void> {
         renderKey,
         sub.guildId,
         sub.channelId,
-      ).catch(() => { });
+      ).catch(() => {});
     },
   );
 

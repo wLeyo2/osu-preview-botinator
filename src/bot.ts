@@ -9,6 +9,8 @@ import logger from '@/utils/logger';
 import { loadCommands } from './utils/loaders/commands';
 import { loadEvents } from './utils/loaders/events';
 
+const botLogger = logger.child({ service: 'bot' });
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -24,7 +26,7 @@ const client = new Client({
     await loadEvents(client, './src/events');
     await client.login(config.token);
   } catch (error) {
-    logger.error(error);
+    botLogger.error(error);
     await shutdown('BOOT_FAILURE', 1);
   }
 })();
@@ -34,7 +36,7 @@ async function shutdown(signal: string, exitCode = 0): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  logger.info(`Shutting down gracefully (${signal})...`);
+  botLogger.info({ signal }, 'Shutting down gracefully');
   stopQueueNotifier();
   stopQueueTelemetry();
   await Promise.allSettled([
@@ -54,5 +56,5 @@ process.on('SIGTERM', () => {
 });
 
 process.on('unhandledRejection', (error) => {
-  logger.error(error);
+  botLogger.error(error);
 });

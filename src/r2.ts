@@ -316,14 +316,18 @@ export async function listVideosInR2(): Promise<R2Object[]> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to list R2 objects: ${response.status} ${await response.text()}`);
+    throw new Error(
+      `Failed to list R2 objects: ${response.status} ${await response.text()}`,
+    );
   }
 
   const xml = await response.text();
 
   // Basic Regex XML parsing since we only need Key and LastModified
   const objects: R2Object[] = [];
-  const matches = xml.matchAll(/<Contents>.*?<Key>(.*?)<\/Key>.*?<LastModified>(.*?)<\/LastModified>.*?<\/Contents>/gs);
+  const matches = xml.matchAll(
+    /<Contents>.*?<Key>(.*?)<\/Key>.*?<LastModified>(.*?)<\/LastModified>.*?<\/Contents>/gs,
+  );
   for (const match of Array.from(matches)) {
     if (match[1] && match[2]) {
       objects.push({
@@ -350,7 +354,9 @@ export async function deleteVideosFromR2(keys: string[]): Promise<void> {
   const amzDate = getAmzDate(date);
 
   // Build XML payload for S3 DeleteObjects
-  const objectsXml = keys.map(k => `<Object><Key>${k}</Key></Object>`).join('');
+  const objectsXml = keys
+    .map((k) => `<Object><Key>${k}</Key></Object>`)
+    .join('');
   const payload = `<?xml version="1.0" encoding="UTF-8"?>\n<Delete>${objectsXml}<Quiet>true</Quiet></Delete>`;
   const payloadBuffer = Buffer.from(payload);
   const payloadHash = getSha256(payloadBuffer);
@@ -388,7 +394,9 @@ export async function deleteVideosFromR2(keys: string[]): Promise<void> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to delete R2 objects: ${response.status} ${await response.text()}`);
+    throw new Error(
+      `Failed to delete R2 objects: ${response.status} ${await response.text()}`,
+    );
   }
 }
 
@@ -405,12 +413,16 @@ export async function pruneBucketLimit(): Promise<void> {
     videos.sort((a, b) => a.LastModified.getTime() - b.LastModified.getTime());
 
     const numToDelete = videos.length - config.r2.maxCapacity;
-    const toDelete = videos.slice(0, numToDelete).map(v => v.Key);
+    const toDelete = videos.slice(0, numToDelete).map((v) => v.Key);
 
-    logger.info(`[R2 Prune] Bucket capacity exceeded (${videos.length}/${config.r2.maxCapacity}). Deleting ${numToDelete} oldest videos...`);
+    logger.info(
+      `[R2 Prune] Bucket capacity exceeded (${videos.length}/${config.r2.maxCapacity}). Deleting ${numToDelete} oldest videos...`,
+    );
     await deleteVideosFromR2(toDelete);
     logger.info(`[R2 Prune] Deleted ${numToDelete} old videos successfully.`);
   } catch (err) {
-    logger.error(`[R2 Prune] Failed to prune bucket: ${err instanceof Error ? err.message : String(err)}`);
+    logger.error(
+      `[R2 Prune] Failed to prune bucket: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }

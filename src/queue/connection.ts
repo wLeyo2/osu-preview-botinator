@@ -38,7 +38,17 @@ function buildBullConnection(urlString: string): ConnectionOptions {
 
 export const bullConnection = buildBullConnection(config.redis.url);
 
-export function createRedisConnection(clientName = 'redis'): IORedis {
+interface RedisConnectionOptions {
+  logLifecycleEvents?: boolean;
+}
+
+export function createRedisConnection(
+  clientName = 'redis',
+  options: RedisConnectionOptions = {},
+): IORedis {
+  const logLifecycleEvents =
+    options.logLifecycleEvents ?? config.redis.logLifecycleEvents;
+
   const redis = new IORedis(config.redis.url, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
@@ -47,18 +57,43 @@ export function createRedisConnection(clientName = 'redis'): IORedis {
     connectionName: clientName,
   });
 
-  redis.on('connect', () => {
-    logger.info(`[Redis] ${clientName} connected`);
-  });
-  redis.on('ready', () => {
-    logger.debug(`[Redis] ${clientName} ready`);
-  });
-  redis.on('reconnecting', (delayMs: number) => {
-    logger.warn(`[Redis] ${clientName} reconnecting in ${delayMs}ms`);
-  });
-  redis.on('end', () => {
-    logger.warn(`[Redis] ${clientName} connection closed`);
-  });
+  if (logLifecycleEvents) {
+    let reconnectSuppressed = 0;
+    let lastReconnectLogAt = 0;
+
+    redis.on('ready', () => {
+      if (reconnectSuppressed > 0) {
+        logger.info(
+          `[Redis] ${clientName} recovered (suppressed ${reconnectSuppressed} reconnect logs)`,
+        );
+        reconnectSuppressed = 0;
+      } else {
+        logger.info(`[Redis] ${clientName} ready`);
+      }
+    });
+
+    redis.on('reconnecting', (delayMs: number) => {
+      const now = Date.now();
+      if (now - lastReconnectLogAt < config.redis.reconnectLogIntervalMs) {
+        reconnectSuppressed += 1;
+        return;
+      }
+
+      const suffix =
+        reconnectSuppressed > 0
+          ? ` (suppressed ${reconnectSuppressed} reconnect logs)`
+          : '';
+      reconnectSuppressed = 0;
+      lastReconnectLogAt = now;
+      logger.warn(
+        `[Redis] ${clientName} reconnecting in ${delayMs}ms${suffix}`,
+      );
+    });
+
+    redis.on('end', () => {
+      logger.warn(`[Redis] ${clientName} connection closed`);
+    });
+  }
 
   return redis;
 }
@@ -89,7 +124,9 @@ export async function preflightRedisConnection(
 
   while (attempt <= config.redis.preflightRetries) {
     attempt += 1;
-    const redis = createRedisConnection(clientName);
+    const redis = createRedisConnection(clientName, {
+      logLifecycleEvents: false,
+    });
 
     try {
       await withTimeout(redis.ping(), config.redis.preflightTimeoutMs);

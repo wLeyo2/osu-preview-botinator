@@ -37,16 +37,17 @@ export const command: Command = {
     await interaction.deferReply({ ephemeral: true });
 
     const userId = interaction.user.id;
-    const prefs = getUserPrefs(userId);
+    const prefs = await getUserPrefs(userId);
     const modeInput = interaction.options.getString(
       'mode',
     ) as RenderMode | null;
     const strainInput = interaction.options.getBoolean('strain');
+    const updates: string[] = [];
 
     // No option — show current setting
-    if (!modeInput) {
-      const current =
-        (await getUserPrefs(userId)).renderMode ?? RENDER_MODE_DEFAULT;
+    if (!modeInput && strainInput === null) {
+      const current = prefs.renderMode ?? RENDER_MODE_DEFAULT;
+      const strainOverlay = prefs.strainOverlay ?? STRAIN_OVERLAY_DEFAULT;
       await interaction.editReply(
         `Your render mode: **${current}** — ${MODE_DESCRIPTIONS[current]}\n` +
           `Strain footer: **${strainOverlay ? 'on' : 'off'}**\n` +
@@ -55,7 +56,17 @@ export const command: Command = {
       return;
     }
 
-    await setRenderMode(userId, modeInput);
+    if (modeInput) {
+      await setRenderMode(userId, modeInput);
+      updates.push(
+        `Render mode set to **${modeInput}** — ${MODE_DESCRIPTIONS[modeInput]}`,
+      );
+    }
+
+    if (strainInput !== null) {
+      setStrainOverlay(userId, strainInput);
+      updates.push(`Strain footer set to **${strainInput ? 'on' : 'off'}**.`);
+    }
 
     await interaction.editReply(updates.join('\n'));
   },
