@@ -3,12 +3,42 @@ import logger from '@/utils/logger';
 import { getQueueBacklog } from './videoQueue';
 
 let telemetryTimer: ReturnType<typeof setInterval> | null = null;
+let previousBacklogSignature: string | null = null;
+
+function getBacklogSignature(backlog: {
+  waiting: number;
+  active: number;
+  delayed: number;
+  prioritized: number;
+  paused: number;
+  totalPending: number;
+}): string {
+  return `${backlog.waiting}:${backlog.active}:${backlog.delayed}:${backlog.prioritized}:${backlog.paused}:${backlog.totalPending}`;
+}
 
 async function logQueueBacklog(): Promise<void> {
   try {
     const backlog = await getQueueBacklog();
+    const signature = getBacklogSignature(backlog);
+
+    if (
+      config.queue.telemetryOnlyOnChange &&
+      previousBacklogSignature === signature
+    ) {
+      return;
+    }
+
+    previousBacklogSignature = signature;
+
+    if (backlog.totalPending >= config.queue.maxBacklog) {
+      logger.warn(
+        `[Queue] backlog high waiting=${backlog.waiting} active=${backlog.active} delayed=${backlog.delayed} prioritized=${backlog.prioritized} paused=${backlog.paused} total=${backlog.totalPending}`,
+      );
+      return;
+    }
+
     logger.info(
-      `[Queue] waiting=${backlog.waiting} active=${backlog.active} delayed=${backlog.delayed} prioritized=${backlog.prioritized} paused=${backlog.paused} total=${backlog.totalPending}`,
+      `[Queue] backlog waiting=${backlog.waiting} active=${backlog.active} delayed=${backlog.delayed} prioritized=${backlog.prioritized} paused=${backlog.paused} total=${backlog.totalPending}`,
     );
   } catch (error) {
     logger.error(
@@ -37,4 +67,5 @@ export function stopQueueTelemetry(): void {
 
   clearInterval(telemetryTimer);
   telemetryTimer = null;
+  previousBacklogSignature = null;
 }

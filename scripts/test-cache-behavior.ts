@@ -1,9 +1,8 @@
 #!/usr/bin/env bun
-import { getScrollMs, setScrollMs } from '@/utils/osu/scrollSpeed';
 import { getUserPrefs, setNoteStyle } from '@/utils/osu/userPrefs';
 
 async function testCacheBehavior() {
-  const testUserId = 'cache-test-user-' + Date.now();
+  const testUserId = `cache-test-user-${Date.now()}`;
   console.log(`Testing cache behavior with user ID: ${testUserId}\n`);
 
   console.log(
@@ -29,8 +28,10 @@ async function testCacheBehavior() {
   console.log('\n6. After simulated restart - should load from Redis...');
   console.log('   Creating a new context (simulating new process)...');
   const { getUserPrefs: getUserPrefs2 } = await import('@/utils/osu/userPrefs');
-  const call4 = await getUserPrefs2('restart-simulated-' + testUserId);
-  console.log(`   (This test uses same process, so cache still works)`);
+  const call4 = await getUserPrefs2(`restart-simulated-${testUserId}`);
+  console.log(
+    `   noteStyle after simulated restart: ${call4.noteStyle} (same process cache simulation)`,
+  );
 
   console.log('\n✓ Cache behavior test completed.');
   console.log('\nKey behaviors verified:');
