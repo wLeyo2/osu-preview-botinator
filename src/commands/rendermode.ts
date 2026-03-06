@@ -64,7 +64,7 @@ export const command: Command = {
     }
 
     if (strainInput !== null) {
-      setStrainOverlay(userId, strainInput);
+      await setStrainOverlay(userId, strainInput);
       updates.push(`Strain footer set to **${strainInput ? 'on' : 'off'}**.`);
     }
 

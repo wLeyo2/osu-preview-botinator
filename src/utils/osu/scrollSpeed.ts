@@ -46,6 +46,7 @@ export async function getScrollMs(userId: string): Promise<number> {
 export async function setScrollMs(userId: string, ms: number): Promise<void> {
   const clamped = Math.max(SCROLL_MS_MIN, Math.min(SCROLL_MS_MAX, ms));
   userScrollMs.set(userId, clamped);
+  redisCacheMisses.delete(userId);
 
   try {
     const { setScrollSpeedToRedis } = await import('@/queue/store');
