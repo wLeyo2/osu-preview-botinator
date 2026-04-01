@@ -32,54 +32,18 @@ if (commands.length === 0) {
 
 const rest = new REST().setToken(config.token);
 
-const isGlobalDeploy = process.argv.includes('--global') || !config.guildId;
+const isGlobalDeploy = true;
 
 (async () => {
   try {
     logger.info(
-      `Started refreshing ${commands.length} application (/) commands.`,
+      `Started refreshing ${commands.length} application (/) commands globally...`,
     );
 
-    if (isGlobalDeploy) {
-      if (!config.guildId) {
-        logger.info(
-          'GUILD_ID not set — deploying globally (may take up to 1 hour to propagate).',
-        );
-      } else {
-        logger.info('--global flag set — deploying globally.');
-      }
-      await rest.put(Routes.applicationCommands(config.clientId), {
-        body: commands,
-      });
-      logger.info('Successfully deployed commands globally.');
-    } else {
-      const guildIds = config.guildId
-        .split(',')
-        .map((id) => id.trim())
-        .filter(Boolean);
-      logger.info(`Deploying commands to ${guildIds.length} guild(s)...`);
-
-      for (const guildId of guildIds) {
-        try {
-          await rest.put(
-            Routes.applicationGuildCommands(config.clientId, guildId),
-            { body: commands },
-          );
-          logger.info(`Successfully deployed commands to guild: ${guildId}`);
-        } catch (err: unknown) {
-          const code = (err as { code?: number })?.code;
-          if (code === 50001) {
-            logger.error(
-              `Guild ${guildId}: Missing Access (50001). ` +
-                `Make sure the bot is a member of this guild and the ID is correct. ` +
-                `Remove GUILD_ID from .env or use --global to deploy globally instead.`,
-            );
-          } else {
-            logger.error(`Guild ${guildId}: ${err}`);
-          }
-        }
-      }
-    }
+    await rest.put(Routes.applicationCommands(config.clientId), {
+      body: commands,
+    });
+    logger.info('Successfully deployed commands globally.');
   } catch (error) {
     logger.error(`Error deploying commands: ${error}`);
   }
