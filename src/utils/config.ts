@@ -19,6 +19,7 @@ const env = cleanEnv(process.env, {
   TOKEN: str(),
   CLIENT_ID: str(),
   GUILD_ID: str({ default: '' }),
+  BLOCKED_GUILDS: str({ default: '1467630302615830807' }),
   SHOW_DEBUG: bool({ default: false }),
   REDIS_URL: str({ default: 'redis://127.0.0.1:6379' }),
   REDIS_KEY_PREFIX: str({ default: 'osu-preview-botinator' }),
@@ -80,6 +81,7 @@ export default {
   token: env.TOKEN,
   clientId: env.CLIENT_ID,
   guildId: env.GUILD_ID,
+  blockedGuilds: env.BLOCKED_GUILDS.split(',').map((id) => id.trim()).filter(Boolean),
   showDebug: env.SHOW_DEBUG,
   redis: {
     url: env.REDIS_URL,
