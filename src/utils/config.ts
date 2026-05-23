@@ -38,13 +38,15 @@ const env = cleanEnv(process.env, {
   QUEUE_TELEMETRY_INTERVAL_SEC: num({ default: 30 }),
   QUEUE_TELEMETRY_ONLY_ON_CHANGE: bool({ default: true }),
   FFMPEG_THREADS: num({ default: 2 }),
+  BUFFER_POOL_SIZE: num({ default: 10 }),
+  FFMPEG_CODEC: str({ default: 'h264' }),
   JOB_ATTEMPTS: num({ default: 3 }),
   JOB_BACKOFF_MS: num({ default: 5_000 }),
   RENDER_CACHE_TTL_SEC: num({ default: 2_592_000 }),
   DELIVERY_DEDUP_WINDOW_SEC: num({ default: 300 }),
   QUEUE_NOTICE_COOLDOWN_SEC: num({ default: 30 }),
   REQUEST_COOLDOWN_SEC: num({ default: 3 }),
-  RENDERER_VERSION: str({ default: 'v1' }),
+  RENDERER_VERSION: str({ default: 'v2' }),
   RENDER_FPS: num({ default: 45 }),
   AUDIO_BITRATE_KBPS: num({ default: 96 }),
   AUDIO_HEADER_TIMEOUT_MS: num({ default: 8_000 }),
@@ -66,7 +68,7 @@ const env = cleanEnv(process.env, {
   CLOUD_SECRETKEY: str(),
   R2_PUBLIC_URL: str(),
   R2_BUCKET: str(),
-  R2_MAX_CAPACITY: num({ default: 50 }),
+  R2_MAX_CAPACITY_GB: num({ default: 10 }),
 });
 
 const workerConcurrency = Math.max(1, Math.min(2, env.WORKER_CONCURRENCY));
@@ -76,12 +78,15 @@ const audioBitrateKbps = Math.max(
   64,
   Math.min(320, Math.floor(env.AUDIO_BITRATE_KBPS)),
 );
+const bufferSize = Math.max(4, Math.min(12, Math.floor(env.BUFFER_POOL_SIZE)));
 
 export default {
   token: env.TOKEN,
   clientId: env.CLIENT_ID,
   guildId: env.GUILD_ID,
-  blockedGuilds: env.BLOCKED_GUILDS.split(',').map((id) => id.trim()).filter(Boolean),
+  blockedGuilds: env.BLOCKED_GUILDS.split(',')
+    .map((id) => id.trim())
+    .filter(Boolean),
   showDebug: env.SHOW_DEBUG,
   redis: {
     url: env.REDIS_URL,
@@ -114,6 +119,8 @@ export default {
     ffmpegThreads,
     fps: renderFps,
     audioBitrateKbps,
+    bufferSize,
+    ffmpegCodec: env.FFMPEG_CODEC.toLowerCase(),
     cacheTtlSec: Math.max(60, env.RENDER_CACHE_TTL_SEC),
     deliveryDedupWindowSec: Math.max(10, env.DELIVERY_DEDUP_WINDOW_SEC),
     rendererVersion: env.RENDERER_VERSION,
@@ -138,6 +145,6 @@ export default {
     secretAccessKey: env.CLOUD_SECRETKEY,
     publicUrl: env.R2_PUBLIC_URL,
     bucket: env.R2_BUCKET,
-    maxCapacity: Math.max(0, env.R2_MAX_CAPACITY),
+    maxCapacityBytes: Math.max(0, env.R2_MAX_CAPACITY_GB) * 1024 * 1024 * 1024,
   },
 };

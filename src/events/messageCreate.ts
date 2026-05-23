@@ -62,7 +62,7 @@ async function upsertQueueStatusMessage(
     guildId,
     channelId,
     createdMessage.id,
-  ).catch(() => { });
+  ).catch(() => {});
 }
 
 export const event: Event<Events.MessageCreate> = {
@@ -71,7 +71,6 @@ export const event: Event<Events.MessageCreate> = {
   async execute(message) {
     if (message.author.bot) return;
     if (!message.guild) return;
-
 
     const match = message.content.match(BEATMAP_URL_REGEX);
     if (!match) return;
@@ -85,7 +84,7 @@ export const event: Event<Events.MessageCreate> = {
         .reply({
           content: `Please wait ${remaining}s before requesting again.`,
         })
-        .catch(() => { });
+        .catch(() => {});
       return;
     }
 
@@ -104,7 +103,7 @@ export const event: Event<Events.MessageCreate> = {
         .reply({
           content: err instanceof Error ? err.message : 'Invalid osu! URL.',
         })
-        .catch(() => { });
+        .catch(() => {});
       return;
     }
 
@@ -139,7 +138,7 @@ export const event: Event<Events.MessageCreate> = {
         if (canDeliver) {
           await message
             .reply({ content: cachedResult.videoUrl })
-            .catch(() => { });
+            .catch(() => {});
           logger.info(
             `[Render cache hit] beatmap=${beatmapId} key=${renderKey} guild=${message.guild.id} channel=${message.channel.id}`,
           );
@@ -155,7 +154,7 @@ export const event: Event<Events.MessageCreate> = {
                 content:
                   'That preview was already posted in this channel recently. Ask again in a few minutes to repost the cached URL.',
               })
-              .catch(() => { });
+              .catch(() => {});
           }
         }
 
@@ -189,7 +188,7 @@ export const event: Event<Events.MessageCreate> = {
                 `Render queue is currently full (${backlogBefore.totalPending}/${config.queue.maxBacklog}). ` +
                 `Please retry in a few minutes (estimated wait ~${etaMinutes} min).`,
             })
-            .catch(() => { });
+            .catch(() => {});
         }
 
         logger.warn(
@@ -250,14 +249,14 @@ export const event: Event<Events.MessageCreate> = {
           renderKey,
           message.guild.id,
           message.channel.id,
-        ).catch(() => { });
+        ).catch(() => {});
       }
       await message
         .reply({
           content:
             'Failed to queue preview render. Please try again in a moment.',
         })
-        .catch(() => { });
+        .catch(() => {});
     }
   },
 };

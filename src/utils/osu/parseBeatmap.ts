@@ -49,7 +49,7 @@ export interface BeatmapMeta {
    * Strain values from rosu-pp-js for the chart.
    * Each value covers `strainSectionMs` ms of the map.
    */
-  strainValues: number[];
+  strainValues: Float64Array;
   /** Duration of each strain section in ms */
   strainSectionMs: number;
   /** Map-time origin (ms) used for strain section index 0 */
@@ -227,7 +227,7 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
   // Star rating + strains via rosu-pp-js
   let stars = 0;
   let bpm = 0;
-  let strainValues: number[] = [];
+  let strainValues = new Float64Array(0);
   let strainSectionMs = 400; // rosu-pp-js default
   let rosuBeatmap: RosuBeatmap | null = null;
   let difficulty: Difficulty | null = null;
@@ -257,7 +257,7 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
         : (strainsObj.aim ?? strainsObj.strains); // std: aim, fallback overall
 
     if (raw_strains) {
-      strainValues = Array.from(raw_strains);
+      strainValues = new Float64Array(raw_strains);
     }
   } finally {
     // Free all WASM-backed objects immediately — their memory lives on the WASM

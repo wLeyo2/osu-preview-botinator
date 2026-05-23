@@ -67,7 +67,11 @@ export function renderStrainChart(meta: BeatmapMeta): Buffer {
   const plotW = CHART_W - PAD_L - PAD_R;
   const plotH = CHART_H - PAD_T - PAD_B;
 
-  const maxStrain = Math.max(...values, 1);
+  let maxStrain = 1;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i] ?? 0;
+    if (v > maxStrain) maxStrain = v;
+  }
 
   // Horizontal grid lines at 25 / 50 / 75 %
   ctx.strokeStyle = GRID_LINE;

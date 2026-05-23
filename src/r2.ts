@@ -268,7 +268,20 @@ async function uploadAttempt(
 
 interface R2Object {
   Key: string;
+  Size: number;
   LastModified: Date;
+}
+
+export async function getBucketSizeBytes(): Promise<{
+  totalBytes: number;
+  objects: R2Object[];
+}> {
+  const objects = await listVideosInR2();
+  let totalBytes = 0;
+  for (const obj of objects) {
+    totalBytes += obj.Size;
+  }
+  return { totalBytes, objects };
 }
 
 export async function listVideosInR2(): Promise<R2Object[]> {
@@ -323,16 +336,17 @@ export async function listVideosInR2(): Promise<R2Object[]> {
 
   const xml = await response.text();
 
-  // Basic Regex XML parsing since we only need Key and LastModified
+  // Parse Key, Size, and LastModified from each <Contents> entry
   const objects: R2Object[] = [];
   const matches = xml.matchAll(
-    /<Contents>.*?<Key>(.*?)<\/Key>.*?<LastModified>(.*?)<\/LastModified>.*?<\/Contents>/gs,
+    /<Contents>.*?<Key>(.*?)<\/Key>.*?<Size>(\d+)<\/Size>.*?<LastModified>(.*?)<\/LastModified>.*?<\/Contents>/gs,
   );
   for (const match of Array.from(matches)) {
-    if (match[1] && match[2]) {
+    if (match[1] && match[2] && match[3]) {
       objects.push({
         Key: match[1],
-        LastModified: new Date(match[2]),
+        Size: Number(match[2]),
+        LastModified: new Date(match[3]),
       });
     }
   }
@@ -401,28 +415,51 @@ export async function deleteVideosFromR2(keys: string[]): Promise<void> {
 }
 
 export async function pruneBucketLimit(): Promise<void> {
-  if (config.r2.maxCapacity <= 0) return;
+  if (config.r2.maxCapacityBytes <= 0) return;
 
   try {
-    const videos = await listVideosInR2();
-    if (videos.length <= config.r2.maxCapacity) {
+    const { totalBytes, objects } = await getBucketSizeBytes();
+    const maxBytes = config.r2.maxCapacityBytes;
+
+    if (totalBytes <= maxBytes) {
+      logger.debug(
+        `[R2 Prune] Bucket size ${formatBytes(totalBytes)} / ${formatBytes(maxBytes)} — within limit.`,
+      );
       return;
     }
 
-    // Sort oldest first
-    videos.sort((a, b) => a.LastModified.getTime() - b.LastModified.getTime());
+    // Sort oldest first — delete oldest files until we're under the limit
+    objects.sort((a, b) => a.LastModified.getTime() - b.LastModified.getTime());
 
-    const numToDelete = videos.length - config.r2.maxCapacity;
-    const toDelete = videos.slice(0, numToDelete).map((v) => v.Key);
+    let bytesToDelete = totalBytes - maxBytes;
+    const toDelete: string[] = [];
+
+    for (const obj of objects) {
+      if (bytesToDelete <= 0) break;
+      toDelete.push(obj.Key);
+      bytesToDelete -= obj.Size;
+    }
+
+    if (toDelete.length === 0) return;
 
     logger.info(
-      `[R2 Prune] Bucket capacity exceeded (${videos.length}/${config.r2.maxCapacity}). Deleting ${numToDelete} oldest videos...`,
+      `[R2 Prune] Bucket size ${formatBytes(totalBytes)} exceeds limit ${formatBytes(maxBytes)}. Deleting ${toDelete.length} oldest videos (${formatBytes(totalBytes - Math.max(0, bytesToDelete))} freed)...`,
     );
     await deleteVideosFromR2(toDelete);
-    logger.info(`[R2 Prune] Deleted ${numToDelete} old videos successfully.`);
+    logger.info(
+      `[R2 Prune] Deleted ${toDelete.length} old videos successfully.`,
+    );
   } catch (err) {
     logger.error(
       `[R2 Prune] Failed to prune bucket: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }

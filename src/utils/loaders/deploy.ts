@@ -32,7 +32,7 @@ if (commands.length === 0) {
 
 const rest = new REST().setToken(config.token);
 
-const isGlobalDeploy = true;
+const _isGlobalDeploy = true;
 
 (async () => {
   try {

@@ -1,6 +1,6 @@
 import { Events, MessageFlags } from 'discord.js';
-import { Cooldown } from '@/utils/cooldown';
 import config from '@/utils/config';
+import { Cooldown } from '@/utils/cooldown';
 import logger from '@/utils/logger';
 import type { Event } from '@/utils/types/event';
 
@@ -12,7 +12,10 @@ export const event: Event<Events.InteractionCreate> = {
   async execute(interaction) {
     if (!interaction.isChatInputCommand()) return;
 
-    if (interaction.guildId && config.blockedGuilds.includes(interaction.guildId)) {
+    if (
+      interaction.guildId &&
+      config.blockedGuilds.includes(interaction.guildId)
+    ) {
       await interaction.reply({
         content: 'This server is not allowed to use this bot.',
         flags: MessageFlags.Ephemeral,
