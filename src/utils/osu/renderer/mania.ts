@@ -385,7 +385,10 @@ export async function renderManiaFrames(
   const visibleBottom =
     scrollDirection === 'up' ? VIDEO_HEIGHT - 70 + noteCapH : hitLineY;
 
-  // Ring buffer for frame pixel data
+  // Ring buffer for frame pixel data.
+  // canvas.data() allocates in WASM linear memory that never shrinks.
+  // We copy out of WASM immediately via .copy() into a pre-allocated slot,
+  // so WASM memory stays bounded (only ringSize slots exist at any time).
   const ringSize = 3;
   const ring = Array.from({ length: ringSize }, () =>
     Buffer.allocUnsafe(VIDEO_WIDTH * VIDEO_HEIGHT * 4),
@@ -528,13 +531,11 @@ export async function renderManiaFrames(
     // Header (pre-rendered)
     c.drawImage(headerLayer.canvas, 0, 0);
 
-    // Extract pixels via ring buffer
+    // Extract pixels via ring buffer — copy out of WASM immediately
     const pixelData = (canvas as unknown as { data: () => Buffer }).data();
-    const ringBuffer = ring[ringIdx % ringSize];
-    if (ringBuffer) {
-      pixelData.copy(ringBuffer);
-    }
+    const target = ring[ringIdx % ringSize]!;
+    pixelData.copy(target);
     ringIdx++;
-    await onFrame(ringBuffer ?? pixelData, frameIdx, totalFrames);
+    await onFrame(target, frameIdx, totalFrames);
   }
 }

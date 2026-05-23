@@ -176,7 +176,7 @@ async function runEncode(
 ): Promise<void> {
   const fps = config.render.fps;
   const totalFrames = Math.ceil((durationMs / 1000) * fps);
-  const frameSize = VIDEO_WIDTH * VIDEO_HEIGHT * 4;
+  const _frameSize = VIDEO_WIDTH * VIDEO_HEIGHT * 4;
 
   const codecInfo = detectCodec();
   logger.info(
@@ -229,8 +229,6 @@ async function runEncode(
 
   const stdin = ffmpegProc.stdin;
   if (!stdin) throw new Error('FFmpeg stdin not available');
-
-  // Write a frame to FFmpeg stdin, handling backpressure.
   // Returns a promise that resolves when the frame is consumed.
   const writeFrame = (buffer: Buffer): Promise<void> => {
     return new Promise((resolve, reject) => {
@@ -260,11 +258,9 @@ async function runEncode(
         opts: renderOpts,
       },
       async (rgbaData: Buffer, frameIdx: number, total: number) => {
-        // Copy into a fresh buffer (ring buffer no longer needed since
-        // writeFrame handles backpressure synchronously)
-        const buffer = Buffer.allocUnsafe(frameSize);
-        rgbaData.copy(buffer);
-        await writeFrame(buffer);
+        // rgbaData is a ring buffer slot from the renderer (already a pure-JS copy).
+        // Write directly to FFmpeg stdin with backpressure.
+        await writeFrame(rgbaData);
 
         if (frameIdx > 0 && frameIdx % 500 === 0) {
           logger.debug(`[Encoder] frame ${frameIdx}/${total}`);
