@@ -3,12 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Writable } from 'node:stream';
 import config from '@/utils/config';
 import logger from '@/utils/logger';
 import type { AudioResult } from './fetchAudio';
 import type { BeatmapMeta } from './parseBeatmap';
 import type { RenderOptions } from './renderer';
-import { renderManiaFrames, VIDEO_HEIGHT, VIDEO_WIDTH } from './renderer';
+import { getRenderer } from './renderer';
 import type { RenderMode } from './userPrefs';
 
 // ─── Constants ───
@@ -39,23 +40,25 @@ function detectCodec(): CodecInfo {
     return {
       name: 'libx265',
       preset: 'ultrafast',
-      extraArgs: ['-tag:v', 'hvc1'],
+      extraArgs: ['-crf', '28', '-tag:v', 'hvc1'],
     };
   }
-  return { name: 'libx264', preset: 'ultrafast', extraArgs: [] };
+  return { name: 'libx264', preset: 'ultrafast', extraArgs: ['-crf', '28'] };
 }
 
-// ─── FFmpeg args builder ───
+// ─── FFmpeg args builders ───
 
-function buildFfmpegArgs(
-  codecInfo: CodecInfo,
-  fps: number,
-  audioPath: string,
-  audioSeekMs: number,
-  durationMs: number,
-  outPath: string,
-): string[] {
-  const { ffmpegThreads, audioBitrateKbps } = config.render;
+interface VideoFfmpegOpts {
+  codec: CodecInfo;
+  fps: number;
+  durationMs: number;
+  outPath: string;
+  width: number;
+  height: number;
+}
+
+function buildVideoFfmpegArgs(opts: VideoFfmpegOpts): string[] {
+  const { codec, fps, durationMs, outPath, width, height } = opts;
 
   return [
     '-f',
@@ -63,33 +66,54 @@ function buildFfmpegArgs(
     '-pixel_format',
     'rgba',
     '-video_size',
-    `${VIDEO_WIDTH}x${VIDEO_HEIGHT}`,
+    `${width}x${height}`,
     '-framerate',
     String(fps),
     '-i',
     'pipe:0',
+    '-c:v',
+    codec.name,
+    '-preset',
+    codec.preset,
+    ...codec.extraArgs,
+    '-threads',
+    String(config.render.ffmpegThreads),
+    '-pix_fmt',
+    'yuv420p',
+    '-an',
+    '-t',
+    (durationMs / 1000).toFixed(3),
+    '-movflags',
+    '+faststart',
+    '-y',
+    outPath,
+  ];
+}
+
+interface MuxFfmpegOpts {
+  videoPath: string;
+  audioPath: string;
+  audioSeekMs: number;
+  durationMs: number;
+  outPath: string;
+}
+
+function buildMuxFfmpegArgs(opts: MuxFfmpegOpts): string[] {
+  const { videoPath, audioPath, audioSeekMs, durationMs, outPath } = opts;
+
+  return [
+    '-i',
+    videoPath,
     '-ss',
     (audioSeekMs / 1000).toFixed(3),
     '-i',
     audioPath,
     '-c:v',
-    codecInfo.name,
-    '-preset',
-    codecInfo.preset,
-    '-tune',
-    'zerolatency',
-    '-threads',
-    String(Math.min(ffmpegThreads, 2)),
-    ...(codecInfo.name === 'libx264' || codecInfo.name === 'libx265'
-      ? ['-crf', '28']
-      : []),
-    ...codecInfo.extraArgs,
-    '-pix_fmt',
-    'yuv420p',
+    'copy',
     '-c:a',
     'aac',
     '-b:a',
-    `${audioBitrateKbps}k`,
+    `${config.render.audioBitrateKbps}k`,
     '-t',
     (durationMs / 1000).toFixed(3),
     '-movflags',
@@ -101,18 +125,21 @@ function buildFfmpegArgs(
 
 // ─── Main encode function ───
 
+/**
+ * Renders the beatmap to a video-only stream while the audio download
+ * (audioTask) runs concurrently, then remuxes the audio on top.
+ * Returns the path of the final video file.
+ */
 export async function encodeVideo(
   meta: BeatmapMeta,
-  audio: AudioResult,
-  _coverImage: Buffer | null,
+  audioTask: Promise<AudioResult>,
   previewTime: number,
   scrollMs = 500,
   renderOpts: RenderOptions = {},
   renderMode: RenderMode = 'last4min',
 ): Promise<string> {
-  const firstNoteMs = meta.notes[0]?.startTime ?? 0;
-  const lastNoteMs =
-    meta.notes.at(-1)?.endTime ?? meta.notes.at(-1)?.startTime ?? firstNoteMs;
+  const firstNoteMs = meta.firstObjectMs;
+  const lastNoteMs = Math.max(meta.lastObjectMs, firstNoteMs);
   const drainMs =
     meta.drainSeconds > 0 ? meta.drainSeconds * 1000 : MAX_RENDER_MS;
 
@@ -136,131 +163,156 @@ export async function encodeVideo(
     durationMs = MAX_RENDER_MS + TAIL_MS;
   }
 
-  const audioSeekMs = videoMapStartMs;
-  const outPath = join(tmpdir(), `osu-preview-${randomUUID()}.mp4`);
-  const audioPath = join(tmpdir(), `osu-audio-${randomUUID()}${audio.ext}`);
+  const renderer = getRenderer(meta.mode);
+  // The taiko lane is horizontal and needs a longer lookahead than the
+  // mania playfield; scale the user's scroll preference accordingly.
+  const effectiveScrollMs = meta.mode === 1 ? scrollMs * 2 : scrollMs;
 
-  await fs.writeFile(audioPath, audio.buffer);
-  (audio as { buffer: Buffer | null }).buffer = null;
+  // If one branch fails, stop the other instead of letting it run on.
+  const cancel = new AbortController();
+  const guard = <T>(promise: Promise<T>): Promise<T> =>
+    promise.catch((err) => {
+      if (!cancel.signal.aborted) cancel.abort(err);
+      throw err;
+    });
 
-  try {
-    await runEncode(
+  let audioPath: string | null = null;
+  let videoOnlyPath: string | null = null;
+
+  const audioPromise = guard(
+    audioTask.then(async (audio) => {
+      const path = join(tmpdir(), `osu-audio-${randomUUID()}${audio.ext}`);
+      await fs.writeFile(path, audio.buffer);
+      (audio as { buffer: Buffer | null }).buffer = null;
+      audioPath = path;
+      return path;
+    }),
+  );
+
+  const videoPromise = guard(
+    encodeVideoOnly(
+      renderer,
       meta,
       videoMapStartMs,
       durationMs,
-      audioSeekMs,
-      audioPath,
-      outPath,
-      scrollMs,
+      effectiveScrollMs,
       renderOpts,
+      cancel.signal,
+    ).then((path) => {
+      videoOnlyPath = path;
+      return path;
+    }),
+  );
+
+  try {
+    const [videoPath, resolvedAudioPath] = await settleBoth(
+      videoPromise,
+      audioPromise,
+      cancel.signal,
+    );
+
+    const outPath = await muxAudio(
+      videoPath,
+      resolvedAudioPath,
+      videoMapStartMs,
+      durationMs,
     );
     logger.info(`Video encoded: ${outPath}`);
     return outPath;
-  } catch (err) {
-    await fs.unlink(outPath).catch(() => {});
-    throw err;
   } finally {
-    await fs.unlink(audioPath).catch(() => {});
+    if (videoOnlyPath) await fs.unlink(videoOnlyPath).catch(() => {});
+    if (audioPath) await fs.unlink(audioPath).catch(() => {});
   }
 }
 
-async function runEncode(
+async function settleBoth<T, U>(
+  first: Promise<T>,
+  second: Promise<U>,
+  cancelSignal: AbortSignal,
+): Promise<[T, U]> {
+  const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+  if (firstResult.status === 'fulfilled' && secondResult.status === 'fulfilled')
+    return [firstResult.value, secondResult.value];
+  // The abort reason is the branch that failed first; the other branch's
+  // rejection is just the cancellation cascade.
+  if (cancelSignal.aborted && cancelSignal.reason instanceof Error)
+    throw cancelSignal.reason;
+  if (firstResult.status === 'rejected') throw firstResult.reason;
+  throw (secondResult as PromiseRejectedResult).reason;
+}
+
+// ─── Video-only encode ───
+
+async function encodeVideoOnly(
+  renderer: ReturnType<typeof getRenderer>,
   meta: BeatmapMeta,
-  videoMapStartMs: number,
+  startMs: number,
   durationMs: number,
-  audioSeekMs: number,
-  audioPath: string,
-  outPath: string,
   scrollMs: number,
   renderOpts: RenderOptions,
-): Promise<void> {
+  signal: AbortSignal,
+): Promise<string> {
   const fps = config.render.fps;
   const totalFrames = Math.ceil((durationMs / 1000) * fps);
-  const _frameSize = VIDEO_WIDTH * VIDEO_HEIGHT * 4;
+  const outPath = join(tmpdir(), `osu-preview-video-${randomUUID()}.mp4`);
+  const frameBytes = renderer.width * renderer.height * 4;
+  const maxBufferedBytes = frameBytes * config.render.encoderBufferFrames;
 
   const codecInfo = detectCodec();
   logger.info(
-    `[Encoder] codec=${codecInfo.name} preset=${codecInfo.preset} frames=${totalFrames} @${fps}fps`,
+    `[Encoder] codec=${codecInfo.name} preset=${codecInfo.preset} frames=${totalFrames} @${fps}fps ${renderer.width}x${renderer.height}`,
   );
 
-  const ffmpegArgs = buildFfmpegArgs(
-    codecInfo,
-    fps,
-    audioPath,
-    audioSeekMs,
-    durationMs,
-    outPath,
+  const ffmpegProc = spawn(
+    'ffmpeg',
+    buildVideoFfmpegArgs({
+      codec: codecInfo,
+      fps,
+      durationMs,
+      outPath,
+      width: renderer.width,
+      height: renderer.height,
+    }),
+    { stdio: ['pipe', 'ignore', 'pipe'] },
   );
 
-  const ffmpegProc = spawn('ffmpeg', ffmpegArgs, {
-    stdio: ['pipe', 'ignore', 'pipe'],
-  });
+  logFfmpegStderr(ffmpegProc, 'Encode');
 
-  let ffmpegExited = false;
-  let _ffmpegExitCode: number | null = null;
-  let ffmpegCloseError: Error | null = null;
-
-  ffmpegProc.stderr?.on('data', (data: Buffer) => {
-    for (const line of data.toString().trim().split('\n')) {
-      if (
-        line.includes('frame=') ||
-        line.includes('error') ||
-        line.includes('Error')
-      ) {
-        logger.debug(`[FFmpeg] ${line.trim()}`);
-      }
-    }
+  let ffmpegFailure: Error | null = null;
+  let stdinError: Error | null = null;
+  const ffmpegDone = waitForFfmpeg(ffmpegProc, 'encoding').catch((err) => {
+    ffmpegFailure = err instanceof Error ? err : new Error(String(err));
+    throw ffmpegFailure;
   });
-
-  ffmpegProc.on('close', (code) => {
-    ffmpegExited = true;
-    _ffmpegExitCode = code;
-    if (code !== 0) {
-      ffmpegCloseError = new Error(`FFmpeg exited with code ${code}`);
-      logger.error(`[FFmpeg] exited with code ${code}`);
-    } else {
-      logger.info('[FFmpeg] encoding complete');
-    }
-  });
-
-  ffmpegProc.on('error', (err) => {
-    logger.error(`[FFmpeg] process error: ${err.message}`);
-  });
+  void ffmpegDone.catch(() => {});
 
   const stdin = ffmpegProc.stdin;
   if (!stdin) throw new Error('FFmpeg stdin not available');
-  // Returns a promise that resolves when the frame is consumed.
-  const writeFrame = (buffer: Buffer): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      if (ffmpegExited) {
-        reject(ffmpegCloseError ?? new Error('FFmpeg already exited'));
-        return;
-      }
-      const ok = stdin.write(buffer);
-      if (ok) {
-        resolve();
-      } else {
-        stdin.once('drain', resolve);
-      }
-    });
-  };
+  stdin.on('error', (err) => {
+    stdinError = err;
+    logger.error(`[FFmpeg] stdin error: ${err.message}`);
+  });
 
-  // Run the renderer, piping each frame directly to FFmpeg.
-  // The writeFrame backpressure naturally throttles the renderer.
   try {
-    await renderManiaFrames(
+    await renderer.renderFrames(
       {
         meta,
-        startMs: videoMapStartMs,
+        startMs,
         durationMs,
         scrollMs,
         fps,
         opts: renderOpts,
       },
       async (rgbaData: Buffer, frameIdx: number, total: number) => {
-        // rgbaData is a ring buffer slot from the renderer (already a pure-JS copy).
-        // Write directly to FFmpeg stdin with backpressure.
-        await writeFrame(rgbaData);
+        if (signal.aborted) throw new Error('Encoding cancelled');
+        const failure = ffmpegFailure ?? stdinError;
+        if (failure) throw failure;
+        await writeFrame(
+          stdin,
+          rgbaData,
+          maxBufferedBytes,
+          () => ffmpegFailure ?? stdinError,
+        );
 
         if (frameIdx > 0 && frameIdx % 500 === 0) {
           logger.debug(`[Encoder] frame ${frameIdx}/${total}`);
@@ -268,48 +320,140 @@ async function runEncode(
       },
     );
   } catch (err) {
-    // Kill FFmpeg if the renderer fails
-    ffmpegProc.kill('SIGKILL');
+    stdin.destroy();
+    ffmpegProc.kill();
+    await ffmpegDone.catch(() => {});
+    await fs.unlink(outPath).catch(() => {});
     throw err;
   }
 
-  // Signal EOF to FFmpeg
-  stdin.end();
+  if (!stdin.destroyed) stdin.end();
+  await ffmpegDone;
 
-  // Wait for FFmpeg to finish
+  return outPath;
+}
+
+async function writeFrame(
+  stdin: Writable,
+  buffer: Buffer,
+  maxBufferedBytes: number,
+  getFailure: () => Error | null,
+): Promise<void> {
+  const beforeWriteFailure = getFailure();
+  if (beforeWriteFailure) throw beforeWriteFailure;
+
+  let canContinue: boolean;
+  try {
+    canContinue = stdin.write(buffer);
+  } catch (err) {
+    const failure = getFailure();
+    throw failure ?? err;
+  }
+  // Each frame exceeds the pipe's highWaterMark, so write() returns false on
+  // every call. Waiting for drain per frame would leave only one frame in
+  // flight; instead keep queueing until the byte budget is hit, then let
+  // ffmpeg catch up. 'drain' only fires after a false write, so never wait
+  // when canContinue is true.
+  if (canContinue || stdin.writableLength < maxBufferedBytes) return;
+
   await new Promise<void>((resolve, reject) => {
-    if (ffmpegExited) {
-      ffmpegCloseError ? reject(ffmpegCloseError) : resolve();
-      return;
+    const cleanup = () => {
+      stdin.off('drain', onDrain);
+      stdin.off('error', onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(getFailure() ?? err);
+    };
+    stdin.once('drain', onDrain);
+    stdin.once('error', onError);
+  });
+
+  const afterDrainFailure = getFailure();
+  if (afterDrainFailure) throw afterDrainFailure;
+}
+
+// ─── Audio remux ───
+
+async function muxAudio(
+  videoPath: string,
+  audioPath: string,
+  audioSeekMs: number,
+  durationMs: number,
+): Promise<string> {
+  const outPath = join(tmpdir(), `osu-preview-${randomUUID()}.mp4`);
+  const ffmpegProc = spawn(
+    'ffmpeg',
+    buildMuxFfmpegArgs({
+      videoPath,
+      audioPath,
+      audioSeekMs,
+      durationMs,
+      outPath,
+    }),
+    { stdio: ['ignore', 'ignore', 'pipe'] },
+  );
+  logFfmpegStderr(ffmpegProc, 'Mux');
+  try {
+    await waitForFfmpeg(ffmpegProc, 'muxing');
+  } catch (err) {
+    await fs.unlink(outPath).catch(() => {});
+    throw err;
+  }
+  return outPath;
+}
+
+// ─── FFmpeg process helpers ───
+
+function logFfmpegStderr(proc: ReturnType<typeof spawn>, label: string): void {
+  proc.stderr?.on('data', (data: Buffer) => {
+    for (const line of data.toString().trim().split('\n')) {
+      if (
+        line.includes('frame=') ||
+        line.includes('error') ||
+        line.includes('Error')
+      ) {
+        logger.debug(`[FFmpeg:${label}] ${line.trim()}`);
+      }
     }
-    ffmpegProc.once('close', (code) => {
-      code === 0
-        ? resolve()
-        : reject(new Error(`FFmpeg exited with code ${code}`));
-    });
   });
 }
 
-// ─── Cover image fetch ───
+function waitForFfmpeg(
+  proc: ReturnType<typeof spawn>,
+  action: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve();
+    };
 
-export async function fetchCoverImage(
-  beatmapSetId: string,
-): Promise<Buffer | null> {
-  const url = `https://assets.ppy.sh/beatmaps/${beatmapSetId}/covers/cover@2x.jpg`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, config.render.coverFetchTimeoutMs);
+    proc.once('close', (code, signal) => {
+      if (code === 0) {
+        logger.info(`[FFmpeg] ${action} complete`);
+        settle();
+        return;
+      }
 
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) return null;
-    return Buffer.from(await res.arrayBuffer());
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
+      const status = code === null ? `signal ${signal}` : `code ${code}`;
+      const error = new Error(`FFmpeg exited with ${status}`);
+      logger.error(`[FFmpeg] ${action} failed: ${status}`);
+      settle(error);
+    });
+
+    proc.once('error', (err) => {
+      logger.error(`[FFmpeg] process error: ${err.message}`);
+      settle(err);
+    });
+  });
 }
 
 // ─── Cleanup ───
