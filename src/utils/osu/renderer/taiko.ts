@@ -441,13 +441,6 @@ export class TaikoRenderer implements Renderer {
 
       c.drawImage(baseLayer, 0, 0);
 
-      // Notes and barlines exist only inside the playfield; they vanish at
-      // the drum boundary instead of sliding over it
-      c.save();
-      c.beginPath();
-      c.rect(PLAYFIELD_LEFT, LANE_TOP, TW - PLAYFIELD_LEFT, LANE_H);
-      c.clip();
-
       // Barlines
       while (
         barStart < barVis.length &&
@@ -537,7 +530,20 @@ export class TaikoRenderer implements Renderer {
         }
       }
 
-      c.restore();
+      // Re-blit the drum-area slice of the base layer over anything that
+      // scrolled past the playfield edge — same effect as clipping notes and
+      // barlines to the playfield, but far cheaper than per-frame ctx.clip()
+      c.drawImage(
+        baseLayer,
+        0,
+        LANE_TOP,
+        PLAYFIELD_LEFT,
+        LANE_H,
+        0,
+        LANE_TOP,
+        PLAYFIELD_LEFT,
+        LANE_H,
+      );
 
       // Autoplay drum hit flashes, alternating left/right hands;
       // big notes light both hands
