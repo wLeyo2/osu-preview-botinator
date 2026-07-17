@@ -19,10 +19,16 @@ Both `process-compose.yaml` and `ecosystem.config.js` already include it.
 ## Install (Ubuntu ARM64 / OCI)
 
 ```bash
-curl -L https://dragonflydb.gateway.scarf.sh/latest/dragonfly-aarch64 \
-  -o /usr/local/bin/dragonfly
-chmod +x /usr/local/bin/dragonfly
+curl -L https://dragonflydb.gateway.scarf.sh/latest/dragonfly-aarch64.tar.gz \
+  -o /tmp/dragonfly.tar.gz
+tar xzf /tmp/dragonfly.tar.gz -C /tmp
+sudo mv /tmp/dragonfly-aarch64 /usr/local/bin/dragonfly
+sudo chmod +x /usr/local/bin/dragonfly
+dragonfly --version
 ```
+
+(For x86 machines use `dragonfly-x86_64.tar.gz`; the same tarballs are also on
+the GitHub releases page: `github.com/dragonflydb/dragonfly/releases`.)
 
 ## Migrating existing data
 
