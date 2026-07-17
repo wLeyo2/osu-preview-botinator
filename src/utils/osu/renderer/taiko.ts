@@ -425,9 +425,10 @@ export class TaikoRenderer implements Renderer {
       : null;
     const baseLayer = buildBaseLayer(meta, strainOverlay);
 
-    // Visual-ms distances to the playfield edges, for culling
-    const leftCutoffVis =
-      ((HIT_X - PLAYFIELD_LEFT + R_BIG * 2) / TRAVEL_W) * scrollMs;
+    // Notes are consumed at the hit target (autoplay hits everything), so
+    // nothing is drawn left of HIT_X. Barlines scroll on until the
+    // playfield's left edge.
+    const barLeftCutoffVis = ((HIT_X - PLAYFIELD_LEFT) / TRAVEL_W) * scrollMs;
     const rightCutoffVis = ((TW - HIT_X + R_BIG * 2) / TRAVEL_W) * scrollMs;
 
     let activeStart = 0;
@@ -444,7 +445,7 @@ export class TaikoRenderer implements Renderer {
       // Barlines
       while (
         barStart < barVis.length &&
-        (barVis[barStart] ?? 0) < currentVis - leftCutoffVis
+        (barVis[barStart] ?? 0) < currentVis - barLeftCutoffVis
       )
         barStart++;
       c.fillStyle = 'rgba(255,255,255,0.10)';
@@ -452,6 +453,7 @@ export class TaikoRenderer implements Renderer {
         const bv = barVis[i] ?? 0;
         if (bv > currentVis + rightCutoffVis) break;
         const x = xOf(bv, currentVis);
+        if (x < PLAYFIELD_LEFT) continue;
         c.fillRect(Math.round(x), LANE_TOP + 2, 1, LANE_H - 4);
       }
 
@@ -462,9 +464,10 @@ export class TaikoRenderer implements Renderer {
         LANE_CY - hitTarget.height / 2,
       );
 
-      // Advance the active-note window
+      // Advance the active-note window (a note is done once its end passes
+      // the hit target)
       while (activeStart < noteCount) {
-        if ((endVis[activeStart] ?? 0) >= currentVis - leftCutoffVis) break;
+        if ((endVis[activeStart] ?? 0) >= currentVis) break;
         activeStart++;
       }
       if (activeEnd < activeStart) activeEnd = activeStart;
@@ -476,14 +479,16 @@ export class TaikoRenderer implements Renderer {
       }
 
       // Draw later notes first so earlier notes (closer to the hit target)
-      // stack on top, matching taiko's visual convention
+      // stack on top, matching taiko's visual convention. Hit notes pop the
+      // moment their center crosses the target (the burst is the pop);
+      // drumrolls and swells are eaten at the target until the tail passes.
       for (let i = activeEnd - 1; i >= activeStart; i--) {
         const note = notes[i];
         if (!note) continue;
-        if ((endVis[i] ?? 0) < currentVis - leftCutoffVis) continue;
+        if ((endVis[i] ?? 0) < currentVis) continue;
 
         const r = note.isBig ? R_BIG : R_SMALL;
-        const headX = xOf(startVis[i] ?? 0, currentVis);
+        const headX = Math.max(xOf(startVis[i] ?? 0, currentVis), HIT_X);
 
         if (note.kind === 'hit') {
           const spr = note.isKat
@@ -529,21 +534,6 @@ export class TaikoRenderer implements Renderer {
           );
         }
       }
-
-      // Re-blit the drum-area slice of the base layer over anything that
-      // scrolled past the playfield edge — same effect as clipping notes and
-      // barlines to the playfield, but far cheaper than per-frame ctx.clip()
-      c.drawImage(
-        baseLayer,
-        0,
-        LANE_TOP,
-        PLAYFIELD_LEFT,
-        LANE_H,
-        0,
-        LANE_TOP,
-        PLAYFIELD_LEFT,
-        LANE_H,
-      );
 
       // Autoplay drum hit flashes, alternating left/right hands;
       // big notes light both hands
