@@ -23,6 +23,25 @@ export interface SvPoint {
   svMultiplier: number;
 }
 
+export type TaikoNoteKind = 'hit' | 'drumroll' | 'swell';
+
+export interface TaikoNote {
+  startTime: number;
+  endTime: number;
+  kind: TaikoNoteKind;
+  /** Rim hit (blue); only meaningful for kind "hit" */
+  isKat: boolean;
+  /** Finisher (large note) */
+  isBig: boolean;
+}
+
+/** Uninherited (red line) timing point */
+export interface TimingPoint {
+  time: number;
+  beatLength: number;
+  meter: number;
+}
+
 export interface BeatmapMeta {
   title: string;
   titleUnicode: string;
@@ -30,7 +49,7 @@ export interface BeatmapMeta {
   artistUnicode: string;
   creator: string;
   version: string;
-  /** Game mode: 0=std, 3=mania */
+  /** Game mode: 0=std, 1=taiko, 3=mania */
   mode: number;
   /** Key count. For mania this is the CS field. */
   keys: number;
@@ -45,6 +64,14 @@ export interface BeatmapMeta {
   bpm: number;
   /** All mania hit objects (only populated when mode === 3) */
   notes: ManiaNote[];
+  /** All taiko hit objects (only populated when mode === 1) */
+  taikoNotes: TaikoNote[];
+  /** Uninherited timing points (only populated when mode === 1) */
+  timingPoints: TimingPoint[];
+  /** Start time of the first hit object in ms (any mode) */
+  firstObjectMs: number;
+  /** End time of the last hit object in ms (any mode) */
+  lastObjectMs: number;
   /**
    * Strain values from rosu-pp-js for the chart.
    * Each value covers `strainSectionMs` ms of the map.
@@ -157,13 +184,150 @@ function parseManiaObjects(raw: string, keys: number): ManiaNote[] {
   return notes;
 }
 
-/** Compute drain time in seconds from hit object timestamps and break periods */
-function computeDrainSeconds(raw: string, notes: ManiaNote[]): number {
-  if (notes.length === 0) return 0;
+// ─── Taiko hit objects ───
 
-  const firstTime = notes[0]?.startTime ?? 0;
-  const lastTime =
-    notes[notes.length - 1]?.endTime ?? notes[notes.length - 1]?.startTime ?? 0;
+const HITSOUND_WHISTLE = 2;
+const HITSOUND_FINISH = 4;
+const HITSOUND_CLAP = 8;
+
+function parseTaikoObjects(
+  raw: string,
+  timingPoints: TimingPoint[],
+  svPoints: SvPoint[],
+  sliderMultiplier: number,
+): TaikoNote[] {
+  const section = raw.split(/^\[HitObjects\]/m)[1];
+  if (!section) return [];
+
+  const notes: TaikoNote[] = [];
+  let sorted = true;
+  let prevStart = Number.NEGATIVE_INFINITY;
+
+  for (const line of section.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    if (trimmed.startsWith('[')) break;
+
+    const parts = trimmed.split(',');
+    if (parts.length < 5) continue;
+
+    const startTime = parseInt(parts[2] ?? '0', 10);
+    const typeFlag = parseInt(parts[3] ?? '0', 10);
+    const hitSound = parseInt(parts[4] ?? '0', 10);
+    if (Number.isNaN(startTime) || Number.isNaN(typeFlag)) continue;
+
+    const isBig = (hitSound & HITSOUND_FINISH) !== 0;
+    let note: TaikoNote | null = null;
+
+    if (typeFlag & 1) {
+      const isKat = (hitSound & (HITSOUND_WHISTLE | HITSOUND_CLAP)) !== 0;
+      note = { startTime, endTime: startTime, kind: 'hit', isKat, isBig };
+    } else if (typeFlag & 2) {
+      // Slider = drumroll; duration derives from pixel length and timing
+      const slides = Math.max(1, parseInt(parts[6] ?? '1', 10) || 1);
+      const pixelLength = parseFloat(parts[7] ?? '0') || 0;
+      const beatLength = beatLengthAt(timingPoints, startTime);
+      const sv = svMultiplierAt(svPoints, timingPoints, startTime);
+      const spanMs = (pixelLength / (sliderMultiplier * 100 * sv)) * beatLength;
+      const durationMs = Number.isFinite(spanMs) ? spanMs * slides : 0;
+      note = {
+        startTime,
+        endTime: startTime + Math.max(0, Math.round(durationMs)),
+        kind: 'drumroll',
+        isKat: false,
+        isBig,
+      };
+    } else if (typeFlag & 8) {
+      // Spinner = swell (denden)
+      const endTime = parseInt(parts[5] ?? '0', 10);
+      note = {
+        startTime,
+        endTime: Number.isNaN(endTime)
+          ? startTime
+          : Math.max(startTime, endTime),
+        kind: 'swell',
+        isKat: false,
+        isBig,
+      };
+    }
+
+    if (!note) continue;
+    if (note.startTime < prevStart) sorted = false;
+    prevStart = note.startTime;
+    notes.push(note);
+  }
+
+  if (!sorted) notes.sort((a, b) => a.startTime - b.startTime);
+  return notes;
+}
+
+function beatLengthAt(timingPoints: TimingPoint[], timeMs: number): number {
+  let beatLength = timingPoints[0]?.beatLength ?? 500;
+  for (const pt of timingPoints) {
+    if (pt.time > timeMs) break;
+    beatLength = pt.beatLength;
+  }
+  return beatLength > 0 ? beatLength : 500;
+}
+
+/** An uninherited point resets SV to 1.0; inherited points after it apply. */
+function svMultiplierAt(
+  svPoints: SvPoint[],
+  timingPoints: TimingPoint[],
+  timeMs: number,
+): number {
+  let lastReset = Number.NEGATIVE_INFINITY;
+  for (const pt of timingPoints) {
+    if (pt.time > timeMs) break;
+    lastReset = pt.time;
+  }
+  let sv = 1.0;
+  for (const pt of svPoints) {
+    if (pt.time > timeMs) break;
+    sv = pt.time >= lastReset ? pt.svMultiplier : 1.0;
+  }
+  return sv;
+}
+
+function parseUninheritedPoints(raw: string): TimingPoint[] {
+  const section = raw.split(/^\[TimingPoints\]/m)[1]?.split(/^\[/m)[0];
+  if (!section) return [];
+
+  const points: TimingPoint[] = [];
+  for (const line of section.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    if (trimmed.startsWith('[')) break;
+
+    const parts = trimmed.split(',');
+    if (parts.length < 2) continue;
+
+    const time = parseFloat(parts[0] ?? '0');
+    const beatLength = parseFloat(parts[1] ?? '0');
+    const meter = parseInt(parts[2] ?? '4', 10);
+    const uninherited = parseInt(parts[6] ?? '1', 10);
+
+    if (Number.isNaN(time) || Number.isNaN(beatLength)) continue;
+    if (uninherited === 0 || beatLength <= 0) continue;
+
+    points.push({
+      time,
+      beatLength,
+      meter: Number.isNaN(meter) || meter <= 0 ? 4 : meter,
+    });
+  }
+
+  points.sort((a, b) => a.time - b.time);
+  return points;
+}
+
+/** Compute drain time in seconds from hit object timestamps and break periods */
+function computeDrainSeconds(
+  raw: string,
+  firstTime: number,
+  lastTime: number,
+): number {
+  if (lastTime <= firstTime) return 0;
 
   // Parse break periods to subtract from drain time
   let breakMs = 0;
@@ -186,19 +350,12 @@ function computeDrainSeconds(raw: string, notes: ManiaNote[]): number {
   return Math.max(0, (lastTime - firstTime - breakMs) / 1000);
 }
 
-function computeStrainStartMs(notes: ManiaNote[], sectionMs: number): number {
-  if (notes.length === 0) return 0;
-
+function computeStrainStartMs(
+  firstObjectMs: number,
+  sectionMs: number,
+): number {
   const section = Math.max(1, Math.floor(sectionMs));
-  let firstStart = Number.POSITIVE_INFINITY;
-  for (const note of notes) {
-    if (note.startTime < firstStart) {
-      firstStart = note.startTime;
-    }
-  }
-
-  if (!Number.isFinite(firstStart)) return 0;
-  return Math.max(0, Math.floor(firstStart / section) * section);
+  return Math.max(0, Math.floor(firstObjectMs / section) * section);
 }
 
 /**
@@ -254,7 +411,9 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
     const raw_strains: Float64Array | undefined =
       mode === 3
         ? strainsObj.strains // mania overall
-        : (strainsObj.aim ?? strainsObj.strains); // std: aim, fallback overall
+        : mode === 1
+          ? (strainsObj.stamina ?? strainsObj.strains) // taiko: stamina
+          : (strainsObj.aim ?? strainsObj.strains); // std: aim, fallback overall
 
     if (raw_strains) {
       strainValues = new Float64Array(raw_strains);
@@ -268,13 +427,42 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
     rosuBeatmap?.free();
   }
 
-  // Parse mania notes and SV points for rendering
+  // Parse mode-specific hit objects and timing data for rendering
   const notes = mode === 3 ? parseManiaObjects(rawBeatmap, keys) : [];
-  const timingNotes = notes.length > 0 ? notes : parseAllTimings(rawBeatmap);
-  const svPoints = mode === 3 ? parseTimingPoints(rawBeatmap) : [];
+  const svPoints =
+    mode === 3 || mode === 1 ? parseTimingPoints(rawBeatmap) : [];
+  const timingPoints = mode === 1 ? parseUninheritedPoints(rawBeatmap) : [];
+  const sliderMultiplier = parseNumericField(fields, 'SliderMultiplier', 1.4);
+  const taikoNotes =
+    mode === 1
+      ? parseTaikoObjects(rawBeatmap, timingPoints, svPoints, sliderMultiplier)
+      : [];
 
-  const drainSeconds = computeDrainSeconds(rawBeatmap, timingNotes);
-  const strainStartMs = computeStrainStartMs(timingNotes, strainSectionMs);
+  const objects: Array<{ startTime: number; endTime: number }> =
+    mode === 1
+      ? taikoNotes
+      : notes.length > 0
+        ? notes
+        : parseAllTimings(rawBeatmap);
+
+  let firstObjectMs = 0;
+  let lastObjectMs = 0;
+  if (objects.length > 0) {
+    firstObjectMs = objects[0]?.startTime ?? 0;
+    for (const obj of objects) {
+      if (obj.endTime > lastObjectMs) lastObjectMs = obj.endTime;
+    }
+  }
+
+  const drainSeconds = computeDrainSeconds(
+    rawBeatmap,
+    firstObjectMs,
+    lastObjectMs,
+  );
+  const strainStartMs =
+    objects.length > 0
+      ? computeStrainStartMs(firstObjectMs, strainSectionMs)
+      : 0;
 
   return {
     title,
@@ -292,6 +480,10 @@ export function parseBeatmap(rawBeatmap: string): BeatmapMeta {
     drainSeconds,
     bpm,
     notes,
+    taikoNotes,
+    timingPoints,
+    firstObjectMs,
+    lastObjectMs,
     strainValues,
     strainSectionMs,
     strainStartMs,
