@@ -18,7 +18,7 @@ export interface HeaderLayer {
   badgeH: number;
 }
 
-function starColor(stars: number): string {
+export function starColor(stars: number): string {
   if (stars < 2) return '#4fc3f7';
   if (stars < 3) return '#81c784';
   if (stars < 4) return '#ffee58';
@@ -28,7 +28,7 @@ function starColor(stars: number): string {
   return '#212121';
 }
 
-function roundRect(
+export function roundRect(
   ctx: import('@napi-rs/canvas').SKRSContext2D,
   x: number,
   y: number,
