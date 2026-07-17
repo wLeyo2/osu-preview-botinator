@@ -1,12 +1,36 @@
 version: "0.5"
 
 processes:
+  # Dragonfly replaces Redis (RESP-compatible, multi-threaded).
+  # --default_lua_flags=allow-undeclared-keys is required for BullMQ's Lua scripts.
+  dragonfly:
+    command: >-
+      dragonfly
+      --logtostderr
+      --port 6379
+      --default_lua_flags=allow-undeclared-keys
+      --proactor_threads=2
+      --maxmemory=2gb
+      --dir ./data/dragonfly
+    working_dir: "."
+    availability:
+      restart: "on_failure"
+    log_location: "./logs/dragonfly.log"
+    readiness_probe:
+      exec:
+        command: "redis-cli -p 6379 ping"
+      initial_delay_seconds: 1
+      period_seconds: 2
+
   discord-bot:
     command: "bun run start:bot"
     working_dir: "."
     availability:
       restart: "on_failure"
     log_location: "./logs/discord-bot.log"
+    depends_on:
+      dragonfly:
+        condition: process_healthy
 
   render-worker:
     command: "bun run start:worker"
@@ -14,3 +38,6 @@ processes:
     availability:
       restart: "on_failure"
     log_location: "./logs/render-worker.log"
+    depends_on:
+      dragonfly:
+        condition: process_healthy
