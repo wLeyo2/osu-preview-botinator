@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Writable } from 'node:stream';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import config from '@/utils/config';
 import logger from '@/utils/logger';
 import type { AudioResult } from './fetchAudio';
@@ -354,7 +355,13 @@ async function writeFrame(
   // flight; instead keep queueing until the byte budget is hit, then let
   // ffmpeg catch up. 'drain' only fires after a false write, so never wait
   // when canContinue is true.
-  if (canContinue || stdin.writableLength < maxBufferedBytes) return;
+  if (canContinue || stdin.writableLength < maxBufferedBytes) {
+    // This path awaits nothing real; when the renderer is the slower side it
+    // would run as one unbroken microtask chain and starve timers and I/O
+    // (audio download, BullMQ lock renewal). Yield to the event loop.
+    await yieldToEventLoop();
+    return;
+  }
 
   await new Promise<void>((resolve, reject) => {
     const cleanup = () => {
