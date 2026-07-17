@@ -50,7 +50,7 @@ export interface BeatmapIds {
 export function parseOsuUrl(rawUrl: string): BeatmapIds {
   // New site: https://osu.ppy.sh/beatmapsets/{setId}#{mode}/{mapId}
   const newMatch = rawUrl.match(
-    /osu\.ppy\.sh\/beatmapsets\/(\d+)(?:#(?:osu|mania)\/(\d+))?/,
+    /osu\.ppy\.sh\/beatmapsets\/(\d+)(?:#(?:osu|taiko|fruits|mania)\/(\d+))?/,
   );
   if (newMatch) {
     const beatmapSetId = newMatch[1] ?? '';

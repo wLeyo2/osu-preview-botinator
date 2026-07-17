@@ -2,7 +2,7 @@
 // new: https://osu.ppy.sh/beatmapsets/{setId}#{mode}/{mapId}
 // old: https://osu.ppy.sh/b/{mapId} or /s/{setId}
 export const BEATMAP_URL_REGEX =
-  /https?:\/\/(osu|old)\.ppy\.sh\/(beatmapsets\/(\d+)(#(osu|mania)\/(\d+))?|([bs])\/(\d+))/;
+  /https?:\/\/(osu|old)\.ppy\.sh\/(beatmapsets\/(\d+)(#(osu|taiko|fruits|mania)\/(\d+))?|([bs])\/(\d+))/;
 
 // Indices in the regex match array:
 // [0] full match
@@ -17,4 +17,4 @@ export const BEATMAP_URL_REGEX =
 
 export const FETCH_ATTEMPTS = 3;
 
-export const SUPPORTED_MODES = [0, 3]; // osu!standard = 0, osu!mania = 3
+export const SUPPORTED_MODES = [0, 1, 3]; // osu!standard = 0, osu!taiko = 1, osu!mania = 3
