@@ -1,5 +1,4 @@
-import { Readable } from 'node:stream';
-import { Parse } from 'unzipper';
+import { Unzip, type UnzipFile, UnzipInflate } from 'fflate';
 import config from '@/utils/config';
 import logger from '@/utils/logger';
 
@@ -175,16 +174,12 @@ async function fetchAudioFromMirror(
       throw new Error(`HTTP ${response.status}`);
     }
 
-    const archiveStream = toNodeReadable(response.body);
-    if (!archiveStream) {
+    const body = response.body;
+    if (!body) {
       throw new Error('Beatmap archive response has no readable body.');
     }
 
-    return await extractAudioFromStream(
-      archiveStream,
-      audioFilename,
-      requestAbort.signal,
-    );
+    return await extractAudioFromStream(body, audioFilename, requestAbort);
   } catch (error) {
     if (headerTimedOut) {
       throw new Error(
@@ -208,166 +203,168 @@ async function fetchAudioFromMirror(
   }
 }
 
-function toNodeReadable(
-  body: ReadableStream<Uint8Array> | null,
-): Readable | null {
-  if (!body) return null;
+/**
+ * Streams the .osz through fflate's Unzip, resolving as soon as the audio
+ * entry is fully inflated and aborting the rest of the download.
+ */
+async function extractAudioFromStream(
+  body: ReadableStream<Uint8Array>,
+  preferredFilename: string | undefined,
+  requestAbort: AbortController,
+): Promise<AudioResult> {
+  const reader = body.getReader();
+  const normalizedPreferred = normalizeArchivePath(preferredFilename ?? '');
+  const hasPreferred = normalizedPreferred.length > 0;
+  let streamDone = false;
+  let settled = false;
+  let fallbackCandidate: AudioResult | null = null;
+  let resolveResult!: (result: AudioResult) => void;
+  let rejectResult!: (error: Error) => void;
 
-  if (typeof Readable.fromWeb === 'function') {
-    return Readable.fromWeb(body as globalThis.ReadableStream<Uint8Array>);
+  const resultPromise = new Promise<AudioResult>((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+
+  function resolveOnce(result: AudioResult) {
+    if (settled) return;
+    settled = true;
+    resolveResult(result);
   }
 
-  return Readable.from(
-    (async function* streamChunks() {
-      const reader = body.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) yield value;
-        }
-      } finally {
-        reader.releaseLock();
+  function rejectOnce(error: unknown) {
+    if (settled) return;
+    settled = true;
+    rejectResult(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  const unzip = new Unzip((file) => {
+    handleZipEntry(file, {
+      normalizedPreferred,
+      hasPreferred,
+      get fallbackCandidate() {
+        return fallbackCandidate;
+      },
+      set fallbackCandidate(result) {
+        fallbackCandidate = result;
+      },
+      resolveOnce,
+      rejectOnce,
+    });
+  });
+  unzip.register(UnzipInflate);
+
+  try {
+    while (true) {
+      if (settled) break;
+      const { done, value } = await readWithStallTimeout(
+        reader,
+        config.render.audioStallTimeoutMs,
+        requestAbort,
+      );
+      if (done) {
+        streamDone = true;
+        unzip.push(new Uint8Array(), true);
+        break;
       }
-    })(),
-  );
+      if (value) unzip.push(value, false);
+    }
+
+    if (!settled) {
+      if (fallbackCandidate) resolveOnce(fallbackCandidate);
+      else
+        rejectOnce(new Error('No audio file found in the beatmapset archive.'));
+    }
+  } catch (err) {
+    rejectOnce(err);
+  } finally {
+    if (!streamDone) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+
+  return resultPromise;
 }
 
-async function extractAudioFromStream(
-  archiveStream: Readable,
-  preferredFilename: string | undefined,
-  signal: AbortSignal,
-): Promise<AudioResult> {
-  return new Promise((resolve, reject) => {
-    const parser = Parse();
+function handleZipEntry(
+  file: UnzipFile,
+  state: {
+    normalizedPreferred: string;
+    hasPreferred: boolean;
+    fallbackCandidate: AudioResult | null;
+    resolveOnce: (result: AudioResult) => void;
+    rejectOnce: (error: unknown) => void;
+  },
+): void {
+  const filename = file.name;
+  const ext = getExtension(filename).toLowerCase();
+  if (!AUDIO_EXTENSIONS.has(ext)) return;
 
-    let settled = false;
-    let streamFinished = false;
-    let pendingEntries = 0;
-    let fallbackCandidate: AudioResult | null = null;
-    let lastProgressAt = Date.now();
-    const normalizedPreferred = preferredFilename?.toLowerCase() ?? '';
-    const hasPreferred = normalizedPreferred.length > 0;
+  const filenameLower = normalizeArchivePath(filename);
+  const wantsPreferred =
+    state.hasPreferred &&
+    (filenameLower === state.normalizedPreferred ||
+      filenameLower.endsWith(`/${state.normalizedPreferred}`));
+  const takeImmediate = !state.hasPreferred;
+  const captureForFallback =
+    state.hasPreferred && !wantsPreferred && !state.fallbackCandidate;
 
-    const stallCheckIntervalMs = Math.max(
-      500,
-      Math.floor(config.render.audioStallTimeoutMs / 2),
-    );
-    const stallTimer = setInterval(() => {
-      if (settled) return;
-      if (Date.now() - lastProgressAt < config.render.audioStallTimeoutMs)
-        return;
-      rejectOnce(
-        new Error(`stalled for ${config.render.audioStallTimeoutMs}ms`),
-      );
-    }, stallCheckIntervalMs);
+  if (!wantsPreferred && !takeImmediate && !captureForFallback) return;
 
-    function cleanup(): void {
-      clearInterval(stallTimer);
-      signal.removeEventListener('abort', onAbort);
-      archiveStream.removeAllListeners('error');
-      archiveStream.removeListener('data', onProgress);
-      parser.removeAllListeners();
-      archiveStream.unpipe(parser);
-      parser.destroy();
+  const entryChunks: Buffer[] = [];
+  file.ondata = (err, chunk, final) => {
+    if (err) {
+      state.rejectOnce(err);
+      return;
     }
+    if (chunk.length > 0) entryChunks.push(Buffer.from(chunk));
+    if (!final) return;
 
-    function resolveOnce(result: AudioResult): void {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(result);
+    const result: AudioResult = {
+      buffer: Buffer.concat(entryChunks),
+      ext,
+      filename,
+    };
+    if (wantsPreferred || takeImmediate) {
+      state.resolveOnce(result);
+      return;
     }
+    if (!state.fallbackCandidate) state.fallbackCandidate = result;
+  };
 
-    function rejectOnce(error: unknown): void {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error instanceof Error ? error : new Error(String(error)));
-    }
+  try {
+    file.start();
+  } catch (err) {
+    state.rejectOnce(err);
+  }
+}
 
-    function maybeResolveFallback(): void {
-      if (settled || !streamFinished || pendingEntries > 0) return;
-      if (fallbackCandidate) {
-        resolveOnce(fallbackCandidate);
-        return;
-      }
-      rejectOnce(new Error('No audio file found in the beatmapset archive.'));
-    }
+async function readWithStallTimeout(
+  reader: { read: () => Promise<{ done: boolean; value?: Uint8Array }> },
+  timeoutMs: number,
+  requestAbort: AbortController,
+): Promise<{ done: boolean; value?: Uint8Array }> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const readPromise = reader.read();
+  // If the stall timer wins the race, the abort makes this read reject later
+  // with nobody awaiting it — swallow that to avoid an unhandled rejection.
+  readPromise.catch(() => {});
+  try {
+    return await Promise.race([
+      readPromise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          requestAbort.abort();
+          reject(new Error(`stalled for ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
-    function onProgress(): void {
-      lastProgressAt = Date.now();
-    }
-
-    function onAbort(): void {
-      rejectOnce(new Error('aborted'));
-    }
-
-    signal.addEventListener('abort', onAbort, { once: true });
-    archiveStream.on('error', rejectOnce);
-    archiveStream.on('data', onProgress);
-
-    parser.on('entry', (entry: import('unzipper').Entry) => {
-      const filename = entry.path;
-      const ext = getExtension(filename).toLowerCase();
-      const isAudio = AUDIO_EXTENSIONS.has(ext);
-      if (!isAudio) {
-        entry.autodrain();
-        return;
-      }
-
-      const filenameLower = filename.toLowerCase();
-      const wantsPreferred =
-        hasPreferred && filenameLower === normalizedPreferred;
-      const takeImmediate = !hasPreferred;
-      const captureForFallback =
-        hasPreferred && !wantsPreferred && !fallbackCandidate;
-
-      if (!wantsPreferred && !takeImmediate && !captureForFallback) {
-        entry.autodrain();
-        return;
-      }
-
-      pendingEntries += 1;
-      const chunks: Buffer[] = [];
-
-      entry.on('data', (chunk: Buffer) => {
-        lastProgressAt = Date.now();
-        chunks.push(chunk);
-      });
-
-      entry.on('error', rejectOnce);
-      entry.on('end', () => {
-        pendingEntries -= 1;
-        if (settled) return;
-
-        const result: AudioResult = {
-          buffer: Buffer.concat(chunks),
-          ext,
-          filename,
-        };
-
-        if (wantsPreferred || takeImmediate) {
-          resolveOnce(result);
-          return;
-        }
-
-        if (!fallbackCandidate) {
-          fallbackCandidate = result;
-        }
-
-        maybeResolveFallback();
-      });
-    });
-
-    parser.on('error', rejectOnce);
-    parser.on('close', () => {
-      streamFinished = true;
-      maybeResolveFallback();
-    });
-
-    archiveStream.pipe(parser);
-  });
+function normalizeArchivePath(filename: string): string {
+  return filename.trim().replaceAll('\\', '/').toLowerCase();
 }
 
 function getExtension(filename: string): string {
