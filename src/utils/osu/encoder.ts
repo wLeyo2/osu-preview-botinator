@@ -259,6 +259,17 @@ async function encodeVideoOnly(
   const frameBytes = renderer.width * renderer.height * 4;
   const maxBufferedBytes = frameBytes * config.render.encoderBufferFrames;
 
+  // canvas.data() returns a VIEW over the live canvas surface, and stream
+  // writes keep queued buffers by reference — later renders would overwrite
+  // frames still waiting in the queue (torn/duplicated frames). Copy each
+  // frame into a ring slot before queueing; the ring outlives the deepest
+  // possible queue (budget + in-flight write).
+  const ringSize = config.render.encoderBufferFrames + 2;
+  const frameRing: Buffer[] = Array.from({ length: ringSize }, () =>
+    Buffer.allocUnsafe(frameBytes),
+  );
+  let ringIdx = 0;
+
   const codecInfo = detectCodec();
   logger.info(
     `[Encoder] codec=${codecInfo.name} preset=${codecInfo.preset} frames=${totalFrames} @${fps}fps ${renderer.width}x${renderer.height}`,
@@ -308,9 +319,12 @@ async function encodeVideoOnly(
         if (signal.aborted) throw new Error('Encoding cancelled');
         const failure = ffmpegFailure ?? stdinError;
         if (failure) throw failure;
+        const slot = frameRing[ringIdx % ringSize] as Buffer;
+        ringIdx++;
+        rgbaData.copy(slot, 0, 0, frameBytes);
         await writeFrame(
           stdin,
-          rgbaData,
+          slot,
           maxBufferedBytes,
           () => ffmpegFailure ?? stdinError,
         );

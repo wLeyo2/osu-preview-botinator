@@ -359,8 +359,8 @@ export class ManiaRenderer implements Renderer {
       // Header (pre-rendered)
       c.drawImage(headerLayer.canvas, 0, 0);
 
-      // canvas.data() returns a fresh Buffer per call; frames queued on the
-      // encoder's stdin must be distinct buffers, so no ring reuse here.
+      // canvas.data() is a view over the live surface; the encoder copies it
+      // before queueing, so it must not be retained across frames here.
       await onFrame(canvas.data(), frameIdx, totalFrames);
     }
   }
