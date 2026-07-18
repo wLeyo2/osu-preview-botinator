@@ -87,15 +87,23 @@ function noteDrawRect(
   return { x, topY: bottomY - NOTE_H, w: colWidth, h: NOTE_H };
 }
 
-function getNoteColor(
-  col: number,
+// osu!stable's per-keymode colour layout: columns alternate primary/accent
+// from the outer edge inward, mirrored, with the special colour on the centre
+// column of odd keymodes (4K → 1221, 5K → 12S21, 7K → 121S121, 9K → 1212S2121).
+function buildColumnColors(
   keys: number,
   noteColors: string[],
   noteColorSpecial: string,
-): string {
-  const center = Math.floor(keys / 2);
-  if (keys % 2 === 1 && col === center) return noteColorSpecial;
-  return noteColors[col % noteColors.length] ?? '#00aaff';
+): string[] {
+  const primary = noteColors[0] ?? '#ffffff';
+  const accent = noteColors[1] ?? '#00aaff';
+  const half: string[] = [];
+  for (let i = 0; i < Math.floor(keys / 2); i++)
+    half.push(i % 2 === 0 ? primary : accent);
+  const mirrored = [...half].reverse();
+  return keys % 2 === 1
+    ? [...half, noteColorSpecial, ...mirrored]
+    : [...half, ...mirrored];
 }
 
 // ─── Mania renderer ───
@@ -117,12 +125,7 @@ export class ManiaRenderer implements Renderer {
     const keys = Math.max(1, meta.keys);
     const colWidth = Math.floor((VIDEO_WIDTH - COL_GAP * (keys + 1)) / keys);
     const style: NoteStyle = opts.noteStyle ?? 'bar';
-    const noteColors = opts.noteColors ?? [
-      '#00aaff',
-      '#ffffff',
-      '#00aaff',
-      '#ffffff',
-    ];
+    const noteColors = opts.noteColors ?? ['#ffffff', '#00aaff'];
     const noteColorSpecial = opts.noteColorSpecial ?? '#ffdd00';
     const scrollDirection: ScrollDirection = opts.scrollDirection ?? 'down';
     const strainEnabled = opts.strainOverlay ?? true;
@@ -155,16 +158,13 @@ export class ManiaRenderer implements Renderer {
     const noteEndVis = new Float64Array(noteCount);
     const noteColorArr: string[] = new Array(noteCount);
 
+    const columnColors = buildColumnColors(keys, noteColors, noteColorSpecial);
+
     for (let i = 0; i < noteCount; i++) {
       const note = meta.notes[i];
       if (!note) continue;
       noteXArr[i] = colX(note.column);
-      noteColorArr[i] = getNoteColor(
-        note.column,
-        keys,
-        noteColors,
-        noteColorSpecial,
-      );
+      noteColorArr[i] = columnColors[note.column] ?? '#ffffff';
       noteStartVis[i] = svAt(svTable, note.startTime);
       noteEndVis[i] = svAt(svTable, note.endTime);
     }

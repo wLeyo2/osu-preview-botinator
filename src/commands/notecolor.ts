@@ -18,26 +18,16 @@ export const command: Command = {
     .setDescription('Set your personal note colors for mania previews')
     .addStringOption((opt) =>
       opt
-        .setName('col1')
-        .setDescription('Color for columns 1, 5, 9… (hex #RRGGBB)')
+        .setName('primary')
+        .setDescription('Primary note color — outer columns (hex #RRGGBB)')
         .setRequired(false),
     )
     .addStringOption((opt) =>
       opt
-        .setName('col2')
-        .setDescription('Color for columns 2, 6, 10… (hex #RRGGBB)')
-        .setRequired(false),
-    )
-    .addStringOption((opt) =>
-      opt
-        .setName('col3')
-        .setDescription('Color for columns 3, 7, 11… (hex #RRGGBB)')
-        .setRequired(false),
-    )
-    .addStringOption((opt) =>
-      opt
-        .setName('col4')
-        .setDescription('Color for columns 4, 8, 12… (hex #RRGGBB)')
+        .setName('accent')
+        .setDescription(
+          'Accent note color — inner alternating columns (hex #RRGGBB)',
+        )
         .setRequired(false),
     )
     .addStringOption((opt) =>
@@ -53,10 +43,8 @@ export const command: Command = {
     const userId = interaction.user.id;
 
     const inputs: Array<[string, number | 'special']> = [
-      [interaction.options.getString('col1') ?? '', 0],
-      [interaction.options.getString('col2') ?? '', 1],
-      [interaction.options.getString('col3') ?? '', 2],
-      [interaction.options.getString('col4') ?? '', 3],
+      [interaction.options.getString('primary') ?? '', 0],
+      [interaction.options.getString('accent') ?? '', 1],
       [interaction.options.getString('special') ?? '', 'special'],
     ];
 
@@ -68,13 +56,11 @@ export const command: Command = {
       const cols = prefs.noteColors;
       const lines = [
         `**Your current note colors:**`,
-        `col1: \`${cols[0] ?? NOTE_COLORS_DEFAULT[0]}\``,
-        `col2: \`${cols[1] ?? NOTE_COLORS_DEFAULT[1]}\``,
-        `col3: \`${cols[2] ?? NOTE_COLORS_DEFAULT[2]}\``,
-        `col4: \`${cols[3] ?? NOTE_COLORS_DEFAULT[3]}\``,
-        `special: \`${prefs.noteColorSpecial}\``,
+        `primary: \`${cols[0] ?? NOTE_COLORS_DEFAULT[0]}\` (outer columns)`,
+        `accent: \`${cols[1] ?? NOTE_COLORS_DEFAULT[1]}\` (inner columns)`,
+        `special: \`${prefs.noteColorSpecial}\` (center column on odd-key maps)`,
         ``,
-        `Use \`/notecolor col1:#RRGGBB\` to change individual columns.`,
+        `Use \`/notecolor primary:#RRGGBB\` to change individual colors.`,
       ];
       await interaction.editReply(lines.join('\n'));
       return;
@@ -95,7 +81,7 @@ export const command: Command = {
     const updated = provided
       .map(
         ([hex, idx]) =>
-          `${idx === 'special' ? 'special' : `col${(idx as number) + 1}`}: \`${hex}\``,
+          `${idx === 'special' ? 'special' : idx === 0 ? 'primary' : 'accent'}: \`${hex}\``,
       )
       .join('\n');
 
