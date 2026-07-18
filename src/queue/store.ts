@@ -65,7 +65,7 @@ const RENDER_MODES = new Set<RenderMode>(['last4min', 'preview']);
 const SCROLL_DIRECTIONS = new Set<ScrollDirection>(['down', 'up']);
 const DEFAULT_USER_PREFS: UserPrefs = {
   noteStyle: 'bar',
-  noteColors: ['#00aaff', '#00aaff', '#00aaff', '#ffffff'],
+  noteColors: ['#ffffff', '#00aaff'],
   noteColorSpecial: '#ffdd00',
   renderMode: 'last4min',
   scrollDirection: 'down',

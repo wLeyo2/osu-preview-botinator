@@ -7,11 +7,7 @@ import { pruneBucketLimit, uploadVideoToR2 } from '@/r2';
 import config from '@/utils/config';
 import logger from '@/utils/logger';
 import { SUPPORTED_MODES } from '@/utils/osu/constants';
-import {
-  cleanupVideo,
-  encodeVideo,
-  fetchCoverImage,
-} from '@/utils/osu/encoder';
+import { cleanupVideo, encodeVideo } from '@/utils/osu/encoder';
 import {
   extractAudioFilename,
   fetchAudioFromOsz,
@@ -251,7 +247,6 @@ const worker = new Worker<RenderJobData, RenderResult>(
       fetchBeatmap: 0,
       parseBeatmap: 0,
       audioFetch: 0,
-      coverFetch: 0,
       encodeVideo: 0,
       upload: 0,
       cacheWrite: 0,
@@ -287,7 +282,7 @@ const worker = new Worker<RenderJobData, RenderResult>(
 
       if (!supportedModes.has(meta.mode)) {
         throw new UnrecoverableError(
-          'This beatmap mode is not supported. Only osu!standard and osu!mania are supported.',
+          'This beatmap mode is not supported. Only osu!standard, osu!taiko and osu!mania are supported.',
         );
       }
 
@@ -301,26 +296,19 @@ const worker = new Worker<RenderJobData, RenderResult>(
       const previewTime = extractPreviewTime(rawBeatmap);
       const audioFilename = extractAudioFilename(rawBeatmap);
 
+      // Audio download runs concurrently with the render inside encodeVideo;
+      // the encoder awaits it only when it's time to mux.
       const audioTask = (async () => {
         const startedAt = performance.now();
         const audio = await fetchAudioFromOsz(beatmapSetId, audioFilename);
         stageMs.audioFetch = Number((performance.now() - startedAt).toFixed(2));
         return audio;
       })();
-      const coverTask = (async () => {
-        const startedAt = performance.now();
-        const cover = await fetchCoverImage(beatmapSetId);
-        stageMs.coverFetch = Number((performance.now() - startedAt).toFixed(2));
-        return cover;
-      })();
-
-      const [audio, coverImage] = await Promise.all([audioTask, coverTask]);
 
       const encodeStart = performance.now();
       videoPath = await encodeVideo(
         meta,
-        audio,
-        coverImage,
+        audioTask,
         previewTime,
         scrollMs,
         renderOpts,

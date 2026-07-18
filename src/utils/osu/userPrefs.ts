@@ -25,13 +25,13 @@ export const RENDER_MODE_DEFAULT: RenderMode = 'last4min';
 export const SCROLL_DIRECTION_DEFAULT: ScrollDirection = 'down';
 export const STRAIN_OVERLAY_DEFAULT = true;
 
-/** Default note colors — alternating blue/white with yellow for centre column */
-export const NOTE_COLORS_DEFAULT = ['#00aaff', '#ffffff', '#00aaff', '#ffffff'];
+/** Default note palette — [primary, accent]; special is the centre column */
+export const NOTE_COLORS_DEFAULT = ['#ffffff', '#00aaff'];
 export const NOTE_COLOR_SPECIAL_DEFAULT = '#ffdd00';
 
 export interface UserPrefs {
   noteStyle: NoteStyle;
-  /** Per-column colors — up to 4 entries, used modulo */
+  /** Note palette — [0] primary (outer columns), [1] accent (inner) */
   noteColors: string[];
   /** Center-column special color (odd-key maps) */
   noteColorSpecial: string;

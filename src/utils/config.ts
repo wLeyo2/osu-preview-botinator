@@ -38,7 +38,7 @@ const env = cleanEnv(process.env, {
   QUEUE_TELEMETRY_INTERVAL_SEC: num({ default: 30 }),
   QUEUE_TELEMETRY_ONLY_ON_CHANGE: bool({ default: true }),
   FFMPEG_THREADS: num({ default: 2 }),
-  BUFFER_POOL_SIZE: num({ default: 10 }),
+  ENCODER_BUFFER_FRAMES: num({ default: 10 }),
   FFMPEG_CODEC: str({ default: 'h264' }),
   JOB_ATTEMPTS: num({ default: 3 }),
   JOB_BACKOFF_MS: num({ default: 5_000 }),
@@ -46,15 +46,14 @@ const env = cleanEnv(process.env, {
   DELIVERY_DEDUP_WINDOW_SEC: num({ default: 300 }),
   QUEUE_NOTICE_COOLDOWN_SEC: num({ default: 30 }),
   REQUEST_COOLDOWN_SEC: num({ default: 3 }),
-  RENDERER_VERSION: str({ default: 'v2' }),
-  RENDER_FPS: num({ default: 45 }),
+  RENDERER_VERSION: str({ default: 'v3' }),
+  RENDER_FPS: num({ default: 60 }),
   AUDIO_BITRATE_KBPS: num({ default: 96 }),
   AUDIO_HEADER_TIMEOUT_MS: num({ default: 8_000 }),
   AUDIO_TOTAL_TIMEOUT_MS: num({ default: 45_000 }),
   AUDIO_STALL_TIMEOUT_MS: num({ default: 8_000 }),
   AUDIO_HEDGE_DELAY_MS: num({ default: 2_000 }),
   MIRROR_COOLDOWN_SEC: num({ default: 300 }),
-  COVER_FETCH_TIMEOUT_MS: num({ default: 3_000 }),
   GC_MODE: str({ default: 'off' }),
   GC_EVERY_N_JOBS: num({ default: 1 }),
   GC_RSS_THRESHOLD_MB: num({ default: 4000 }),
@@ -71,14 +70,37 @@ const env = cleanEnv(process.env, {
   R2_MAX_CAPACITY_GB: num({ default: 10 }),
 });
 
-const workerConcurrency = Math.max(1, Math.min(2, env.WORKER_CONCURRENCY));
-const ffmpegThreads = Math.max(1, Math.min(2, env.FFMPEG_THREADS));
-const renderFps = Math.max(24, Math.min(60, Math.floor(env.RENDER_FPS)));
-const audioBitrateKbps = Math.max(
-  64,
-  Math.min(320, Math.floor(env.AUDIO_BITRATE_KBPS)),
+// logger imports this module, so clamp warnings use console directly
+function clampEnv(name: string, value: number, min: number, max: number) {
+  const clamped = Math.max(min, Math.min(max, Math.floor(value)));
+  if (clamped !== value) {
+    console.warn(
+      `[Config] ${name}=${value} is outside ${min}-${max}; using ${clamped}`,
+    );
+  }
+  return clamped;
+}
+
+const workerConcurrency = clampEnv(
+  'WORKER_CONCURRENCY',
+  env.WORKER_CONCURRENCY,
+  1,
+  2,
 );
-const bufferSize = Math.max(4, Math.min(12, Math.floor(env.BUFFER_POOL_SIZE)));
+const ffmpegThreads = clampEnv('FFMPEG_THREADS', env.FFMPEG_THREADS, 1, 8);
+const renderFps = clampEnv('RENDER_FPS', env.RENDER_FPS, 24, 60);
+const audioBitrateKbps = clampEnv(
+  'AUDIO_BITRATE_KBPS',
+  env.AUDIO_BITRATE_KBPS,
+  64,
+  320,
+);
+const encoderBufferFrames = clampEnv(
+  'ENCODER_BUFFER_FRAMES',
+  env.ENCODER_BUFFER_FRAMES,
+  1,
+  60,
+);
 
 export default {
   token: env.TOKEN,
@@ -119,7 +141,9 @@ export default {
     ffmpegThreads,
     fps: renderFps,
     audioBitrateKbps,
-    bufferSize,
+    // Frames the encoder may queue on ffmpeg's stdin before waiting for
+    // drain; keeps render and encode overlapped.
+    encoderBufferFrames,
     ffmpegCodec: env.FFMPEG_CODEC.toLowerCase(),
     cacheTtlSec: Math.max(60, env.RENDER_CACHE_TTL_SEC),
     deliveryDedupWindowSec: Math.max(10, env.DELIVERY_DEDUP_WINDOW_SEC),
@@ -129,7 +153,6 @@ export default {
     audioStallTimeoutMs: Math.max(1_000, env.AUDIO_STALL_TIMEOUT_MS),
     audioHedgeDelayMs: Math.max(0, env.AUDIO_HEDGE_DELAY_MS),
     mirrorCooldownSec: Math.max(0, env.MIRROR_COOLDOWN_SEC),
-    coverFetchTimeoutMs: Math.max(500, env.COVER_FETCH_TIMEOUT_MS),
     gcMode: parseGcMode(env.GC_MODE),
     gcEveryNJobs: Math.max(1, env.GC_EVERY_N_JOBS),
     gcRssThresholdMb: Math.max(0, env.GC_RSS_THRESHOLD_MB),

@@ -19,3 +19,14 @@ export interface RenderContext {
   fps: number;
   opts: RenderOptions;
 }
+
+export interface Renderer {
+  readonly gamemode: string;
+  /** Canvas dimensions for this mode (mania is portrait, taiko landscape) */
+  readonly width: number;
+  readonly height: number;
+  renderFrames(
+    ctx: RenderContext,
+    onFrame: (buffer: Buffer, frameIdx: number, total: number) => Promise<void>,
+  ): Promise<void>;
+}
