@@ -3,15 +3,21 @@ version: "0.5"
 processes:
   # Dragonfly replaces Redis (RESP-compatible, multi-threaded).
   # --default_lua_flags=allow-undeclared-keys is required for BullMQ's Lua scripts.
+  # --bind keeps it on loopback: Dragonfly has no protected mode.
+  # --dbfilename/--df_snapshot_format keep dump.rdb in Redis format for rollback.
   dragonfly:
     command: >-
       dragonfly
       --logtostderr
+      --bind 127.0.0.1
       --port 6379
       --default_lua_flags=allow-undeclared-keys
       --proactor_threads=2
       --maxmemory=2gb
       --dir ./data/dragonfly
+      --dbfilename dump
+      --df_snapshot_format=false
+      --snapshot_cron="*/30 * * * *"
     working_dir: "."
     availability:
       restart: "on_failure"
