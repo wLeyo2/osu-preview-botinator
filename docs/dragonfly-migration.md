@@ -5,16 +5,17 @@ application code changes are required: BullMQ, ioredis, and every key the bot
 uses (queue, render cache, user prefs) work unchanged — `REDIS_URL` stays
 `redis://127.0.0.1:6379`.
 
-## Required server flag
+## Required server flags
 
-BullMQ's Lua scripts access keys without declaring them, which Dragonfly
-rejects by default. Start Dragonfly with:
+| Flag | Why |
+|---|---|
+| `--default_lua_flags=allow-undeclared-keys` | BullMQ's Lua scripts touch keys they do not declare, which Dragonfly rejects by default. |
+| `--bind=127.0.0.1` | Dragonfly has no protected mode. Without it, it listens on every interface with no password. |
+| `--dbfilename=dump` | The default name is `dump-{timestamp}`, which never matches a Redis `dump.rdb`, so existing data would not load. |
+| `--df_snapshot_format=false` | Writes snapshots as Redis RDB (`dump.rdb`) instead of Dragonfly's `.dfs`, so Redis can read them on rollback. |
+| `--snapshot_cron=*/30 * * * *` | Dragonfly only snapshots on shutdown by default. This caps a crash to 30 minutes of lost data. |
 
-```
---default_lua_flags=allow-undeclared-keys
-```
-
-Both `process-compose.yaml` and `ecosystem.config.js` already include it.
+Both `process-compose.yaml` and `ecosystem.config.cjs` include all of them.
 
 ## Install (Ubuntu ARM64 / OCI)
 
@@ -32,17 +33,26 @@ the GitHub releases page: `github.com/dragonflydb/dragonfly/releases`.)
 
 ## Migrating existing data
 
-Dragonfly loads Redis RDB snapshots directly:
+Dragonfly loads Redis RDB snapshots directly. This swap keeps the bots running: ioredis
+reconnects on its own, and the store is down for under a second.
 
-1. `redis-cli SAVE` — write a fresh `dump.rdb`.
-2. Stop Redis (`sudo systemctl stop redis` or equivalent).
-3. `mkdir -p data/dragonfly && cp /var/lib/redis/dump.rdb data/dragonfly/`
-4. Start Dragonfly pointing `--dir` at that folder (already configured); it
-   picks up `dump.rdb` on boot.
-5. Verify: `redis-cli ping`, then `redis-cli --scan --pattern 'osu-preview-botinator*' | head`.
+1. `mkdir -p data/dragonfly`
+2. `redis-cli SHUTDOWN SAVE` writes a final `dump.rdb` into Redis's working directory and stops it.
+3. Copy that `dump.rdb` into `data/dragonfly/`.
+4. `pm2 start ecosystem.config.cjs --only dragonfly`, then `pm2 save`.
+5. Verify: `redis-cli ping`, `redis-cli dbsize` (same count as before), and
+   `ss -tln | grep 6379` shows only `127.0.0.1`.
 
 Losing this data is low-stakes (user prefs + render cache with TTL), so a
 clean start is also acceptable.
+
+## Running under pm2
+
+- The app names in `ecosystem.config.cjs` match the running processes (`o!preview`,
+  `o!preview-worker`). Keep them in sync: a new name starts a duplicate bot on the same token.
+- After adding or removing an app, run `pm2 save`, or it will not come back after a reboot.
+- Boot start is a one-time `pm2 startup systemd -u ubuntu --hp /home/ubuntu` (run with `sudo`
+  and a `PATH` that contains `node`).
 
 ## Resource sizing (3-CPU / 24 GB VM)
 
@@ -51,5 +61,6 @@ clean start is also acceptable.
 
 ## Rollback
 
-Stop Dragonfly, start Redis again. The RDB Dragonfly writes on shutdown is
-Redis-compatible (`data/dragonfly/dump.rdb`), so data flows back the same way.
+Stop Dragonfly (`pm2 delete dragonfly`), copy `data/dragonfly/dump.rdb` to Redis's working
+directory and start Redis again with `--bind 127.0.0.1`. Because of `--df_snapshot_format=false`
+that file is plain Redis RDB, so data flows back the same way.
